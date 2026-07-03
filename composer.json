@@ -13,9 +13,9 @@
         "ext-json": "*",
         "ext-curl": "*"
     },
-    "bin": {
-        "patcherly": "patcherly_cli.php"
-    },
+    "bin": [
+        "bin/patcherly"
+    ],
     "autoload": {
         "classmap": [
             "php_agent.php",

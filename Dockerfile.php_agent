@@ -1,0 +1,13 @@
+FROM php:8.2-cli
+
+WORKDIR /app
+COPY php_agent.php /app/php_agent.php
+COPY patcherly_cli.php /app/patcherly_cli.php
+COPY oauth_client.php /app/oauth_client.php
+COPY credential_store.php /app/credential_store.php
+COPY sanitizer.php /app/sanitizer.php
+COPY context_collector.php /app/context_collector.php
+COPY backup_manager.php /app/backup_manager.php
+COPY patch_applicator.php /app/patch_applicator.php
+COPY queue_manager.php /app/queue_manager.php
+CMD ["php", "/app/php_agent.php", "5"]

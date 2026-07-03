@@ -1,0 +1,10 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+/**
+ * Composer / Packagist bin entry — delegates to patcherly_cli.php so
+ * `composer global require patcherly/php-connector` exposes `patcherly`.
+ */
+require __DIR__ . '/../patcherly_cli.php';

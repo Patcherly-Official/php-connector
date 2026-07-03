@@ -1,0 +1,24 @@
+# Deny all access to backup directory
+# This file should be placed in the backup root directory
+# Default location: ../backups/ (outside webroot)
+
+<IfModule mod_authz_core.c>
+    # Apache 2.4+
+    Require all denied
+</IfModule>
+
+<IfModule !mod_authz_core.c>
+    # Apache 2.2
+    Order deny,allow
+    Deny from all
+</IfModule>
+
+# Prevent directory listing
+Options -Indexes
+
+# Prevent access to any files
+<FilesMatch ".*">
+    Order allow,deny
+    Deny from all
+</FilesMatch>
+
