@@ -1,6 +1,70 @@
 <?php
-/** AUTO-GENERATED from config/settings_schema.yaml — do not edit by hand. */
+/** AUTO-GENERATED from config/settings_schema.yaml + log_ingest_skip_patterns.yaml — do not edit by hand. */
 declare(strict_types=1);
+
+if (!function_exists('patcherly_shared_should_skip_log_line_for_ingest')) {
+    function patcherly_shared_should_skip_log_line_for_ingest(string $log_line): bool {
+        $line = trim($log_line);
+        if ($line === '') {
+            return true;
+        }
+        $keep = [
+            "PHP\\s+Fatal",
+            "PHP\\s+Parse\\s+error",
+            "PHP\\s+Recoverable\\s+fatal",
+            "^Fatal error:",
+            "Maximum execution time|Allowed memory size",
+            "Uncaught\\s+\\S*(Error|Exception)",
+            "^Traceback\\s",
+            "^\\w+(Error|Exception):",
+            "^Exception:",
+            "^Error:\\s",
+            "Unhandled\\s+(Promise\\s+)?Rejection",
+            "uncaughtException|uncaught exception",
+            "Assertion failed",
+            "File\\s+[\"']",
+            "^\\s*#\\d+\\s+",
+            "^\\s+at\\s+",
+            "\"level\"\\s*:\\s*\"(error|fatal|critical)\"",
+            "\"level\"\\s*:\\s*50\\b",
+            "\"severity\"\\s*:\\s*\"(ERROR|CRITICAL|FATAL)\"",
+        ];
+        $skip = [
+            "^\\(node:\\d+\\)\\s+\\[DEP\\d+\\]",
+            "DeprecationWarning:",
+            "^UserWarning:",
+            "^\\[info\\]",
+            "^INFO:",
+            "^DEBUG:",
+        ];
+        $phpPrefix = "^PHP\\s+(Notice|Deprecated|Warning|Strict\\s+standards|Info)\\s*:";
+        $subs = ["auditor:scan", "\"kind\":\"installed-plugin\""];
+        $failureSignal = "\\b(error|exception|traceback|fatal|critical|panic|failed|failure|rejection|errno|segfault)\\b|^\\w+(Error|Exception):";
+        foreach ($keep as $pattern) {
+            if (@preg_match('/' . str_replace('/', '\/', $pattern) . '/i', $line) === 1) {
+                return false;
+            }
+        }
+        if ($phpPrefix !== '' && @preg_match('/' . str_replace('/', '\/', $phpPrefix) . '/i', $line) === 1) {
+            return true;
+        }
+        foreach ($skip as $pattern) {
+            if (@preg_match('/' . str_replace('/', '\/', $pattern) . '/i', $line) === 1) {
+                return true;
+            }
+        }
+        $lower = strtolower($line);
+        foreach ($subs as $sub) {
+            if ($sub !== '' && strpos($lower, strtolower((string) $sub)) !== false) {
+                return true;
+            }
+        }
+        if (@preg_match('/' . str_replace('/', '\/', $failureSignal) . '/i', $line) !== 1) {
+            return true;
+        }
+        return false;
+    }
+}
 
 if (!function_exists('patcherly_shared_default_error_type_severities')) {
     function patcherly_shared_default_error_type_severities(): array {

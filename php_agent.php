@@ -303,7 +303,7 @@ class PHPAgent {
     private function extractErrorEvents(array $lines) : array {
         $events = [];
         $current = [];
-        $startOrCont = '/^(Traceback\s|File\s+["\']|Exception:|Error:\s|PHP\s+Fatal|PHP\s+Warning|^\s+at\s+|\s*#\d+\s+)/i';
+        $startOrCont = '/^(Traceback\s|File\s+["\']|Exception:|Error:\s|PHP\s+Fatal|^\s+at\s+|\s*#\d+\s+)/i';
         $errorWord = '/\b(error|exception|traceback|fatal)\b/i';
         // Python exception type line (e.g. "ValueError: bad") — treat as continuation when in a block
         $pythonExceptionLine = '/^\w+(?:Error|Exception):\s/i';
@@ -332,7 +332,10 @@ class PHPAgent {
         }
         $flush();
         if (count($events) === 0) {
-            $errorLines = array_filter($lines, function ($l) { return stripos($l, 'error') !== false; });
+            $errorLines = array_filter($lines, function ($l) {
+                return preg_match('/\b(error|exception|traceback|fatal|critical|failed|failure|rejection)\b/i', $l) === 1
+                    || preg_match('/^\s*\w+(Error|Exception):/i', $l) === 1;
+            });
             if (count($errorLines) > 0) {
                 $events[] = implode('', $errorLines);
             }
@@ -1225,6 +1228,10 @@ class PHPAgent {
         require_once __DIR__ . '/sanitizer.php';
         $logLine = is_string($errorContext) ? $errorContext : (string) $errorContext;
         $logLine = \Patcherly\Connector\Sanitizer::sanitizeLogLineForIngest($logLine);
+        if (patcherly_shared_should_skip_log_line_for_ingest($logLine)) {
+            echo "Non-error log noise skipped.\n";
+            return;
+        }
         $severityFields = patcherly_shared_build_ingest_severity_fields($logLine);
         $payload = [
             'log_line' => $logLine,
