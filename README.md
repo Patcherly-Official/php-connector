@@ -2,7 +2,7 @@
 
 Patcherly detects bugs in real time in your app. It creates a customized AI patch, and once you approve it, backs up your code, fixes it & tests the patch for you. If anything is off, it rolls back the changes automatically, or you can always roll it back in a click.
 
-**[patcherly.com](https://patcherly.com)** · **[PHP connector docs](https://help.patcherly.com/connectors/php/)**
+**[patcherly.com](https://patcherly.com)** · **[PHP connector docs](https://help.patcherly.com/connectors/php/)** · [![Packagist](https://img.shields.io/packagist/v/patcherly/php-connector?style=flat-square)](https://packagist.org/packages/patcherly/php-connector)
 
 ## Recommended install
 
