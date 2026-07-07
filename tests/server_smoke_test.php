@@ -65,6 +65,8 @@ foreach ($candidatePorts as $tryPort) {
         1 => ['pipe', 'w'],
         2 => ['pipe', 'w'],
     ];
+    // FP (semgrep): test spawns php -S on 127.0.0.1 for smoke coverage only.
+    // nosemgrep: php.lang.security.exec-use.exec-use
     $proc = @proc_open($cmd, $descriptors, $pipes, sys_get_temp_dir());
     if (!is_resource($proc)) {
         continue;
@@ -129,6 +131,7 @@ $cleanup = function () use (&$childProc, &$pipes, $isWindows) {
     $pipes = [];
 
     if ($isWindows && $childPid > 0) {
+        // nosemgrep: php.lang.security.exec-use.exec-use
         @exec("taskkill /PID {$childPid} /T /F 2>NUL");
     } else {
         @proc_terminate($childProc, defined('SIGTERM') ? SIGTERM : 15);

@@ -919,6 +919,8 @@ class PHPAgent {
         if (PHP_VERSION_ID < 70400) {
             return ['rc' => -3, 'stdout' => '', 'stderr' => 'php_version_below_7_4_unsupported', 'timed_out' => false];
         }
+        // FP (semgrep): proc_open with argv array — no shell invocation (PHP 7.4+).
+        // nosemgrep: php.lang.security.exec-use.exec-use
         $proc = @proc_open($argv, $descriptors, $pipes, $cwd, $env);
         if (!is_resource($proc)) {
             return ['rc' => -3, 'stdout' => '', 'stderr' => 'proc_open_failed', 'timed_out' => false];
