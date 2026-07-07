@@ -2003,14 +2003,28 @@ class PHPAgent {
     }
     
     private function extractFilePath($errorContext) : ?string {
-        // Extract file path from error context/traceback
+        // Extract file path from error context/traceback. Mirrors the server-side
+        // extract_source_file_path() so path exclusion (incl. exclude_paths) applies
+        // uniformly across languages, not just Python.
         if (empty($errorContext)) return null;
-        
-        // Try to extract from traceback (common format: "File \"/path/to/file.php\", line 123")
+
+        // Python-style traceback: File "/path/to/file.py", line 123
         if (preg_match('/File\s+["\']([^"\']+)["\']/', $errorContext, $matches)) {
             return $matches[1];
         }
-        
+        // PHP fatal / warning: ... in /abs/path/file.php:233  |  ... in /abs/path/file.php on line 233
+        if (preg_match('/\bin\s+((?:\/|[A-Za-z]:[\\\\\/])[^\s:]+?\.\w+)(?::\d+|\s+on line\s+\d+)/i', $errorContext, $matches)) {
+            return $matches[1];
+        }
+        // PHP / Python numbered stack frame: #0 /abs/path/file.php(6454):
+        if (preg_match('/#\d+\s+((?:\/|[A-Za-z]:[\\\\\/])[^\s(]+?\.\w+)\(\d+\)/', $errorContext, $matches)) {
+            return $matches[1];
+        }
+        // Node stack frame: at fn (/abs/path/file.js:12:34)
+        if (preg_match('/\(((?:\/|[A-Za-z]:[\\\\\/])[^\s()]+?\.\w+):\d+(?::\d+)?\)/', $errorContext, $matches)) {
+            return $matches[1];
+        }
+
         return null;
     }
 
