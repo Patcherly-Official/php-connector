@@ -1219,9 +1219,12 @@ class PHPAgent {
         // Update exclude_paths if cache is stale
         $this->updateExcludePaths();
         
-        // PRIMARY FILTERING: Check if error path is excluded BEFORE sending to server
+        // PRIMARY FILTERING: require extractable source path; skip excluded paths
         $filePath = $this->extractFilePath($errorContext);
-        if ($filePath && $this->isPathExcluded($filePath)) {
+        if (!$filePath) {
+            return; // Not ingestable — no file to back up or patch
+        }
+        if ($this->isPathExcluded($filePath)) {
             echo "Error from excluded path skipped: $filePath\n";
             return; // Skip ingestion entirely - don't send to server
         }
@@ -1303,21 +1306,18 @@ class PHPAgent {
         $autoAnalyze = !empty($item['auto_analyze']);
         $autoApply = !empty($item['auto_apply']);
         $ingestedStatus = $item['status'] ?? 'pending';
-        if (!$autoAnalyze || in_array($ingestedStatus, ['ignored', 'excluded', 'dismissed'], true)) {
+        if (!$autoAnalyze || in_array($ingestedStatus, ['ignored', 'excluded', 'dismissed', 'analysis_failed'], true)) {
             echo "Auto-analysis not enabled or error skipped (status={$ingestedStatus}); stopping after ingest.\n";
             return;
         }
 
-        [$analyzeBody, $analyzeCode] = $this->sendSignedWithStatus(
-            'POST',
-            PatcherlyApiPaths::appPath('errors', (string) $id, 'analyze'),
-            []
-        );
-        if ($this->handleProtectionModeHttp((int) $analyzeCode, is_string($analyzeBody) ? $analyzeBody : '')) {
+        $analyzeOutcome = $this->analyzeAndWait((string) $id);
+        if (($analyzeOutcome['status'] ?? '') === 'analysis_failed') {
+            echo "Analysis permanently failed after automatic retries; stopping auto-pipeline.\n";
             return;
         }
-        if ($analyzeCode < 200 || $analyzeCode >= 300) {
-            throw new \Exception("analyze failed: {$analyzeCode}");
+        if (($analyzeOutcome['status'] ?? '') === 'protection_mode') {
+            return;
         }
 
         // v1.49: only chain into approve+apply when autoApply is also true. Otherwise the
@@ -1819,6 +1819,47 @@ class PHPAgent {
             }
         }
         return $headers;
+    }
+
+    /**
+     * Start durable analysis (analyze-async) and wait for terminal status via analysis-wait.
+     * Central API owns retries; sleeps locally on retry_after_seconds between long-polls.
+     *
+     * @return array<string, mixed>
+     */
+    private function analyzeAndWait(string $errorId): array {
+        $maxWall = 8 * 60 * 60;
+        $started = time();
+        $asyncPath = PatcherlyApiPaths::appPath('errors', $errorId, 'analyze-async');
+        [$startBody, $startCode] = $this->sendSignedWithStatus('POST', $asyncPath, []);
+        if ($this->handleProtectionModeHttp((int) $startCode, is_string($startBody) ? $startBody : '')) {
+            return ['terminal' => false, 'status' => 'protection_mode', 'error_id' => $errorId];
+        }
+        if ($startCode < 200 || $startCode >= 300) {
+            throw new \Exception("analyze-async failed: {$startCode}");
+        }
+
+        $waitPath = PatcherlyApiPaths::appPath('errors', $errorId, 'analysis-wait');
+        $waitSignPath = $waitPath . '?timeout=120';
+        while ((time() - $started) < $maxWall) {
+            [$waitBody, $waitCode] = $this->sendSignedWithStatus('GET', $waitSignPath, []);
+            if ($this->handleProtectionModeHttp((int) $waitCode, is_string($waitBody) ? $waitBody : '')) {
+                return ['terminal' => false, 'status' => 'protection_mode', 'error_id' => $errorId];
+            }
+            if ($waitCode < 200 || $waitCode >= 300) {
+                throw new \Exception("analysis-wait failed: {$waitCode}");
+            }
+            $data = json_decode(is_string($waitBody) ? $waitBody : '', true);
+            if (!is_array($data)) {
+                $data = [];
+            }
+            if (!empty($data['terminal'])) {
+                return $data;
+            }
+            $sleepSec = max(5, (int) ($data['retry_after_seconds'] ?? 30));
+            sleep($sleepSec);
+        }
+        throw new \Exception("analysis-wait exceeded 8h wall clock for error {$errorId}");
     }
 
     private function sendSigned($method, $path, $data = null, $headers = []) {
