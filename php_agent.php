@@ -13,6 +13,7 @@
 // Default API URL for auto-discovery fallback (production; proxy only for legacy shared-host)
 define('DEFAULT_API_URL', 'https://api.patcherly.com');
 require_once __DIR__ . '/lib/ingest_severity.php';
+require_once __DIR__ . '/lib/file_context_reader.php';
 require_once __DIR__ . '/lib/api_paths.php';
 
 /**
@@ -296,6 +297,33 @@ class PHPAgent {
     }
 
     /**
+     * Split bundled timestamp-prefixed occurrences in one physical log line.
+     *
+     * @return string[]
+     */
+    private function splitLogOccurrences(string $text) : array {
+        $text = trim($text);
+        if ($text === '') {
+            return [];
+        }
+        $parts = preg_split(
+            '/(?=\[\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}|\[\d{1,2}-[A-Za-z]{3}-\d{4}\s+\d{2}:\d{2}:\d{2})/',
+            $text
+        );
+        if (!is_array($parts)) {
+            return [$text];
+        }
+        $out = [];
+        foreach ($parts as $part) {
+            $part = trim((string) $part);
+            if ($part !== '') {
+                $out[] = $part;
+            }
+        }
+        return $out !== [] ? $out : [$text];
+    }
+
+    /**
      * Extract multi-line error events (stack traces, PHP Fatal, Node Error, etc.).
      * @param string[] $lines
      * @return string[]
@@ -303,7 +331,7 @@ class PHPAgent {
     private function extractErrorEvents(array $lines) : array {
         $events = [];
         $current = [];
-        $startOrCont = '/^(Traceback\s|File\s+["\']|Exception:|Error:\s|PHP\s+Fatal|^\s+at\s+|\s*#\d+\s+)/i';
+        $startOrCont = '/^(Traceback\s|File\s+["\']|Exception:|Error:\s|PHP\s+(?:Fatal|Parse|Warning|Notice|Deprecated)|^\s+at\s+|\s*#\d+\s+)/i';
         $errorWord = '/\b(error|exception|traceback|fatal)\b/i';
         // Python exception type line (e.g. "ValueError: bad") — treat as continuation when in a block
         $pythonExceptionLine = '/^\w+(?:Error|Exception):\s/i';
@@ -500,7 +528,13 @@ class PHPAgent {
                     }
                     fclose($handle);
                     $lastSize = $currentSize;
-                    $events = $this->extractErrorEvents($newLines);
+                    $expanded = [];
+                    foreach ($newLines as $line) {
+                        foreach ($this->splitLogOccurrences(rtrim((string) $line, "\r\n")) as $occurrence) {
+                            $expanded[] = $occurrence . "\n";
+                        }
+                    }
+                    $events = $this->extractErrorEvents($expanded);
                     foreach ($events as $event) {
                         if (trim($event) !== '') {
                             echo "Error detected: " . substr(trim($event), 0, 100) . "...\n";
@@ -517,6 +551,12 @@ class PHPAgent {
                 $this->processRollingBackErrors();
             } catch (\Throwable $e) {
                 error_log('Patcherly: processRollingBackErrors raised: ' . $e->getMessage());
+            }
+
+            try {
+                $this->processApprovedFixes();
+            } catch (\Throwable $e) {
+                error_log('Patcherly: processApprovedFixes raised: ' . $e->getMessage());
             }
 
             // Refresh IDs, log paths, and API URL every 5 minutes (300s / 5s sleep = 60 iterations)
@@ -1253,6 +1293,12 @@ class PHPAgent {
         if ($fw !== null) {
             $payload['code_framework'] = $fw;
         }
+        $payload = patcherly_shared_enrich_ingest_payload_with_file_context(
+            $payload,
+            $logLine,
+            'log_monitor',
+            $filePath
+        );
         [$r1Body, $r1Code] = $this->sendSignedWithStatus('POST', PatcherlyApiPaths::NAMED_ERRORS_INGEST, $payload);
         if ($r1Body === false && $r1Code === 0) {
             // Network error, enqueue for later
@@ -2061,8 +2107,14 @@ class PHPAgent {
         if (preg_match('/#\d+\s+((?:\/|[A-Za-z]:[\\\\\/])[^\s(]+?\.\w+)\(\d+\)/', $errorContext, $matches)) {
             return $matches[1];
         }
-        // Node stack frame: at fn (/abs/path/file.js:12:34)
-        if (preg_match('/\(((?:\/|[A-Za-z]:[\\\\\/])[^\s()]+?\.\w+):\d+(?::\d+)?\)/', $errorContext, $matches)) {
+        // Node stack frame: at fn (/abs/path/file.js:12:34)  |  optional file://
+        if (preg_match('/\(((?:file:\/\/)?(?:\/|[A-Za-z]:[\\\\\/])[^\s()]+?\.\w+):\d+(?::\d+)?\)/', $errorContext, $matches)) {
+            return $matches[1];
+        }
+        if (preg_match('/\bat\s+(?:file:\/\/)?((?:\/|[A-Za-z]:[\\\\\/])[^\s()]+?\.\w+):\d+(?::\d+)?/', $errorContext, $matches)) {
+            return $matches[1];
+        }
+        if (preg_match('/@((?:\/|[A-Za-z]:[\\\\\/])[^\s:@]+?\.\w+):\d+(?::\d+)?/', $errorContext, $matches)) {
             return $matches[1];
         }
 
@@ -2144,6 +2196,137 @@ class PHPAgent {
 
     /** @var array<string,bool> in-memory de-dupe of error_ids handled this run */
     private $rolledBackSeen = [];
+
+    /** @var array<string,bool> in-flight guard for dashboard-approved apply poll */
+    private $approvedApplyInFlight = [];
+
+    /**
+     * Pick up dashboard-approved fixes (status approved/applying) and apply them.
+     * Without this poll, manual approve from the dashboard stalls until a new log
+     * line retriggers the auto_apply ingest pipeline.
+     */
+    public function processApprovedFixes() : void {
+        if (!$this->targetId || $this->isProtectionModeStandby()) {
+            return;
+        }
+        foreach (['approved', 'applying'] as $status) {
+            $listPath = PatcherlyApiPaths::NAMED_ERRORS_LIST;
+            $listQuery = '?status=' . rawurlencode($status)
+                . '&target_id=' . rawurlencode((string)$this->targetId) . '&limit=10';
+            $url = $this->buildApiEndpoint($listPath . $listQuery);
+            $reqHeaders = $this->buildAuthHeaders('GET', $listPath . $listQuery, '');
+            $respHeaders = [];
+            $httpCode = 0;
+            $body = $this->sendGet($url, $reqHeaders, $respHeaders, $httpCode);
+            if ($body === false || $httpCode !== 200) {
+                continue;
+            }
+            $items = json_decode($body, true);
+            if (!is_array($items)) {
+                continue;
+            }
+            foreach ($items as $item) {
+                if (!is_array($item)) {
+                    continue;
+                }
+                $errorId = isset($item['id']) ? (string)$item['id'] : '';
+                if ($errorId === '' || isset($this->approvedApplyInFlight[$errorId])) {
+                    continue;
+                }
+                $this->applyApprovedFixFromServer($errorId);
+            }
+        }
+    }
+
+    /**
+     * GET /fix → apply → POST /fix/apply-result for a dashboard-approved error.
+     */
+    private function applyApprovedFixFromServer(string $errorId) : void {
+        $this->approvedApplyInFlight[$errorId] = true;
+        try {
+            $path3 = PatcherlyApiPaths::appPath('errors', $errorId, 'fix');
+            $url = $this->buildApiEndpoint($path3);
+            $reqHeaders = $this->buildAuthHeaders('GET', $path3, '');
+            $responseHeaders = [];
+            $fixHttpCode = 0;
+            $r3 = $this->sendGet($url, $reqHeaders, $responseHeaders, $fixHttpCode);
+            if ($this->handleProtectionModeHttp((int) $fixHttpCode, is_string($r3) ? $r3 : '')) {
+                return;
+            }
+            if ($fixHttpCode < 200 || $fixHttpCode >= 300) {
+                return;
+            }
+            $responseSignature = $responseHeaders['X-Patcherly-Signature'] ?? null;
+            $responseTimestamp = $responseHeaders['X-Patcherly-Timestamp'] ?? null;
+            if (!$this->verifyResponseHmac('GET', $path3, $r3, $responseSignature, $responseTimestamp)) {
+                error_log('Patcherly: HMAC verification failed for approved fix ' . $errorId);
+                return;
+            }
+            $data = $r3 ? json_decode($r3, true) : null;
+            if (is_array($data) && !empty($data['suspicious'])) {
+                $this->postRefusedApplyResult($errorId, self::SUSPICIOUS_REFUSAL_MSG, 'suspicious patch');
+                return;
+            }
+            if (!is_array($data) || !isset($data['fix'])) {
+                return;
+            }
+            $targetDryRun = isset($data['dry_run']) ? (bool) $data['dry_run'] : false;
+            $applyResult = $this->applyFix($data['fix'], $errorId, $targetDryRun);
+            $success = $applyResult['success'] ?? false;
+            $postApplyResult = null;
+            if ($success && !$targetDryRun) {
+                try {
+                    $postApplyResult = $this->maybeRunPostApply($errorId, $data);
+                } catch (\Throwable $e) {
+                    error_log('[patcherly] maybeRunPostApply raised: ' . $e->getMessage());
+                    $postApplyResult = null;
+                }
+            }
+            $applyPayload = [
+                'success' => $success,
+                'fix_path' => $this->logFile,
+                'test_result' => $applyResult['message'] ?? ($success ? 'Fix passed local tests.' : 'Fix failed or rolled back.'),
+            ];
+            if ($targetDryRun) {
+                $applyPayload['dry_run'] = true;
+            }
+            if (!empty($applyResult['backup_metadata']['backup_dir'])) {
+                $applyPayload['backup_path'] = $applyResult['backup_metadata']['backup_dir'];
+            }
+            if ($postApplyResult !== null) {
+                $applyPayload['post_apply'] = $postApplyResult;
+            }
+            [$applyRespBody, $applyStatus] = $this->sendSignedWithStatus(
+                'POST',
+                PatcherlyApiPaths::appPath('errors', $errorId, 'fix', 'apply-result'),
+                $applyPayload
+            );
+            if ($applyStatus === 409) {
+                $detail = '';
+                $decoded = is_string($applyRespBody) ? json_decode($applyRespBody, true) : null;
+                if (is_array($decoded) && isset($decoded['detail'])) {
+                    $detail = (string)$decoded['detail'];
+                }
+                error_log("apply-result returned 409 for {$errorId}; server is canonical, not retrying. detail={$detail}");
+                return;
+            }
+            $delayRaw = (string)getenv('PATCHERLY_POST_APPLY_TEST_DELAY_SEC');
+            $delaySec = is_numeric($delayRaw) ? (float)$delayRaw : 0.0;
+            if (
+                $delaySec > 0
+                && $postApplyResult !== null
+                && !empty($postApplyResult['ran'])
+                && empty($postApplyResult['dry_run'])
+            ) {
+                usleep((int)round($delaySec * 1_000_000));
+            }
+            $this->runTestsAndReport($errorId, $success);
+        } catch (\Throwable $e) {
+            error_log('Patcherly: applyApprovedFixFromServer raised for ' . $errorId . ': ' . $e->getMessage());
+        } finally {
+            unset($this->approvedApplyInFlight[$errorId]);
+        }
+    }
 
     /**
      * Pick up errors that the API has transitioned to ``rolling_back`` because
