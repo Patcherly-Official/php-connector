@@ -2621,8 +2621,12 @@ function patcherly_php_local_router() {
                 
                 if ($path === '/local-approvals' && $_SERVER['REQUEST_METHOD']==='GET'){
                     if (!$requireBearerToken()) { return; }
-                    $resp = file_get_contents($serverUrl . PatcherlyApiPaths::NAMED_ERRORS_LIST . '?status=awaiting_approval');
-                    echo $resp ?: '[]'; return;
+                    $sendSigned = $reflection->getMethod('sendSigned');
+                    $sendSigned->setAccessible(true);
+                    $listPath = PatcherlyApiPaths::NAMED_ERRORS_LIST . '?status=awaiting_approval';
+                    $resp = $sendSigned->invoke($agent, 'GET', $listPath);
+                    echo is_string($resp) && $resp !== '' ? $resp : '[]';
+                    return;
                 }
                 if (preg_match('#^/local-approvals/([^/]+)/(approve|dismiss)$#', $path, $m)){
                     if (!$requireBearerToken()) { return; }
@@ -2632,9 +2636,13 @@ function patcherly_php_local_router() {
                         echo json_encode(['error' => 'error_id must match ^[A-Za-z0-9_-]{1,128}$']);
                         return;
                     }
-                    $url = $serverUrl . PatcherlyApiPaths::appPath('errors', rawurlencode($id), $act);
-                    $ch = curl_init($url); curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'POST'); curl_setopt($ch, CURLOPT_RETURNTRANSFER, true); $resp = curl_exec($ch); $code = curl_getinfo($ch, CURLINFO_HTTP_CODE); curl_close($ch);
-                    http_response_code($code ?: 200); echo $resp ?: '{}'; return;
+                    $sendSignedWithStatus = $reflection->getMethod('sendSignedWithStatus');
+                    $sendSignedWithStatus->setAccessible(true);
+                    $apiPath = PatcherlyApiPaths::appPath('errors', rawurlencode($id), $act);
+                    [$resp, $code] = $sendSignedWithStatus->invoke($agent, 'POST', $apiPath, []);
+                    http_response_code($code ?: 200);
+                    echo is_string($resp) && $resp !== '' ? $resp : '{}';
+                    return;
                 }
                 echo '[]';
     };

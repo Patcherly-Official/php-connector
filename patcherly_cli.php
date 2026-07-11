@@ -372,7 +372,7 @@ function patcherly_cli_preflight_test_mode(string $apiBase, string $accessToken)
 
 function patcherly_cli_emit_test_window_closed(array $opts, ?string $dashboardUrl, ?string $expiresHint): void
 {
-    $msg = 'Test ingest window is not open for this target. Enable it from your '
+    $msg = 'Test mode window is not open for this target. Enable test mode from your '
         . 'Patcherly dashboard (Targets → Test Mode toggle), then retry.';
     if (!empty($opts['json'])) {
         $out = ['error' => 'test_window_closed', 'message' => $msg];
@@ -457,7 +457,7 @@ function patcherly_cli_send_test(array $opts): void
     }
     $detail = $payload['detail'] ?? null;
     if ($status === 403 && is_array($detail) && ($detail['code'] ?? '') === 'test_window_closed') {
-        $msg  = (string) ($detail['message'] ?? 'Test ingest window is not open for this target.');
+        $msg  = (string) ($detail['message'] ?? 'Test mode window is not open for this target.');
         $link = (string) ($detail['dashboard_url'] ?? '');
         if (!empty($opts['json'])) {
             fwrite(STDOUT, json_encode([
