@@ -63,8 +63,13 @@ class Hunk {
     public $context;
     public $removed;
     public $added;
+    /** @var list<array{type:string,text:string}> Diff-body order (context/removed/added). */
+    public $segments;
     
-    public function __construct($origStart, $origLen, $newStart, $newLen, $context, $removed, $added) {
+    /**
+     * @param list<array{type:string,text:string}> $segments
+     */
+    public function __construct($origStart, $origLen, $newStart, $newLen, $context, $removed, $added, $segments = []) {
         $this->origStart = $origStart;
         $this->origLen = $origLen;
         $this->newStart = $newStart;
@@ -72,6 +77,21 @@ class Hunk {
         $this->context = $context;
         $this->removed = $removed;
         $this->added = $added;
+        $this->segments = $segments;
+    }
+
+    /** @return int Lines consumed from the original file for this hunk. */
+    private function orig_lines_in_hunk(): int {
+        if ($this->segments !== []) {
+            $count = 0;
+            foreach ($this->segments as $seg) {
+                if (($seg['type'] ?? '') !== 'added') {
+                    $count++;
+                }
+            }
+            return $count;
+        }
+        return count($this->context) + count($this->removed);
     }
     
     public function canApplyTo($fileLines) {
@@ -79,20 +99,41 @@ class Hunk {
          * Check if this hunk can be applied to the file.
          * Returns: ['canApply' => bool, 'error' => string|null]
          */
-        // Check bounds
         if ($this->origStart < 1) {
             return ['canApply' => false, 'error' => 'Invalid start line (must be >= 1)'];
         }
-        
-        // Check if we have enough lines in file
-        if ($this->origStart - 1 + count($this->context) > count($fileLines)) {
+
+        $origLines = $this->orig_lines_in_hunk();
+        if ($this->origStart - 1 + $origLines > count($fileLines)) {
             return [
                 'canApply' => false,
                 'error' => "Hunk starts at line {$this->origStart} but file has only " . count($fileLines) . " lines"
             ];
         }
+
+        if ($this->segments !== []) {
+            $idx = $this->origStart - 1;
+            foreach ($this->segments as $seg) {
+                $type = $seg['type'] ?? '';
+                if ($type === 'added') {
+                    continue;
+                }
+                if ($idx >= count($fileLines)) {
+                    return ['canApply' => false, 'error' => 'Context mismatch: file too short'];
+                }
+                $expected = rtrim((string) ($seg['text'] ?? ''), "\r\n");
+                $actual = rtrim($fileLines[$idx], "\r\n");
+                if ($actual !== $expected) {
+                    return [
+                        'canApply' => false,
+                        'error' => "Context mismatch at line " . ($idx + 1)
+                    ];
+                }
+                $idx++;
+            }
+            return ['canApply' => true, 'error' => null];
+        }
         
-        // Check context matches
         $startIdx = $this->origStart - 1;
         foreach ($this->context as $i => $expectedLine) {
             if ($startIdx + $i >= count($fileLines)) {
@@ -109,6 +150,66 @@ class Hunk {
         }
         
         return ['canApply' => true, 'error' => null];
+    }
+
+    public function matchesPostImage($fileLines) {
+        if ($this->newStart < 1) {
+            return ['matches' => false, 'error' => 'Invalid new start line (must be >= 1)'];
+        }
+
+        $idx = $this->newStart - 1;
+        if ($this->segments !== []) {
+            foreach ($this->segments as $seg) {
+                $type = $seg['type'] ?? '';
+                if ($type === 'removed') {
+                    continue;
+                }
+                if ($idx >= count($fileLines)) {
+                    return ['matches' => false, 'error' => 'Post-image mismatch: file too short'];
+                }
+                $expected = rtrim((string) ($seg['text'] ?? ''), "\r\n");
+                $actual = rtrim($fileLines[$idx], "\r\n");
+                if ($actual !== $expected) {
+                    return [
+                        'matches' => false,
+                        'error' => "Post-image mismatch at line " . ($idx + 1),
+                    ];
+                }
+                $idx++;
+            }
+            return ['matches' => true, 'error' => null];
+        }
+
+        foreach ($this->context as $line) {
+            if ($idx >= count($fileLines)) {
+                return ['matches' => false, 'error' => 'Post-image mismatch: file too short'];
+            }
+            $expected = rtrim($line, "\r\n");
+            $actual = rtrim($fileLines[$idx], "\r\n");
+            if ($actual !== $expected) {
+                return [
+                    'matches' => false,
+                    'error' => "Post-image mismatch at line " . ($idx + 1),
+                ];
+            }
+            $idx++;
+        }
+        foreach ($this->added as $line) {
+            if ($idx >= count($fileLines)) {
+                return ['matches' => false, 'error' => 'Post-image mismatch: file too short'];
+            }
+            $expected = rtrim($line, "\r\n");
+            $actual = rtrim($fileLines[$idx], "\r\n");
+            if ($actual !== $expected) {
+                return [
+                    'matches' => false,
+                    'error' => "Post-image mismatch at line " . ($idx + 1),
+                ];
+            }
+            $idx++;
+        }
+
+        return ['matches' => true, 'error' => null];
     }
 }
 
@@ -170,6 +271,38 @@ class FilePatch {
         }
         
         return ['canApply' => true, 'error' => null];
+    }
+
+    public function matchesPostImage($filePath) {
+        if (!file_exists($filePath)) {
+            return ['matches' => false, 'error' => 'File does not exist'];
+        }
+
+        $fileLines = [];
+        try {
+            $content = file_get_contents($filePath);
+            if ($content === false) {
+                return ['matches' => false, 'error' => 'Cannot read file'];
+            }
+            $fileLines = explode("\n", $content);
+            $fileLines = array_map(function($line, $idx, $arr) use ($content) {
+                if ($idx < count($arr) - 1 || substr($content, -1) === "\n") {
+                    return $line . "\n";
+                }
+                return $line;
+            }, $fileLines, array_keys($fileLines), array_fill(0, count($fileLines), $fileLines));
+        } catch (Exception $e) {
+            return ['matches' => false, 'error' => "Cannot read file: {$e->getMessage()}"];
+        }
+
+        foreach ($this->hunks as $i => $hunk) {
+            $result = $hunk->matchesPostImage($fileLines);
+            if (!$result['matches']) {
+                return ['matches' => false, 'error' => "Hunk " . ($i + 1) . ": {$result['error']}"];
+            }
+        }
+
+        return ['matches' => true, 'error' => null];
     }
 }
 
@@ -319,6 +452,7 @@ class PatchApplicator {
         $context = [];
         $removed = [];
         $added = [];
+        $segments = [];
         
         // Parse hunk content
         $i = $startIdx + 1;
@@ -331,23 +465,26 @@ class PatchApplicator {
             }
             
             if (strpos($line, ' ') === 0) {
-                // Context line (unchanged)
-                $context[] = substr($line, 1);
+                $text = substr($line, 1);
+                $context[] = $text;
+                $segments[] = ['type' => 'context', 'text' => $text];
             } elseif (strpos($line, '-') === 0) {
-                // Removed line
-                $removed[] = substr($line, 1);
+                $text = substr($line, 1);
+                $removed[] = $text;
+                $segments[] = ['type' => 'removed', 'text' => $text];
             } elseif (strpos($line, '+') === 0) {
-                // Added line
-                $added[] = substr($line, 1);
+                $text = substr($line, 1);
+                $added[] = $text;
+                $segments[] = ['type' => 'added', 'text' => $text];
             } elseif (trim($line) === '') {
-                // Empty line in context
                 $context[] = '';
+                $segments[] = ['type' => 'context', 'text' => ''];
             }
             
             $i++;
         }
         
-        return [new Hunk($origStart, $origLen, $newStart, $newLen, $context, $removed, $added), $i];
+        return [new Hunk($origStart, $origLen, $newStart, $newLen, $context, $removed, $added, $segments), $i];
     }
     
     public function applyPatch($filePatch, $filePath, $dryRun = false, $verifySyntax = true) {
@@ -365,6 +502,14 @@ class PatchApplicator {
         // Check if patch can be applied
         $canApply = $filePatch->canApplyTo($filePath);
         if (!$canApply['canApply']) {
+            $already = $filePatch->matchesPostImage($filePath);
+            if (!empty($already['matches'])) {
+                return [
+                    'success' => true,
+                    'message' => "Patch already applied to {$filePath}",
+                    'syntaxErrors' => null,
+                ];
+            }
             return [
                 'success' => false,
                 'message' => "Cannot apply patch: {$canApply['error']}",
@@ -464,6 +609,28 @@ class PatchApplicator {
          * Apply a single hunk to file lines.
          */
         $startIdx = $hunk->origStart - 1;
+
+        if (!empty($hunk->segments)) {
+            $result = array_slice($fileLines, 0, $startIdx);
+            $origConsumed = 0;
+            foreach ($hunk->segments as $seg) {
+                $type = $seg['type'] ?? '';
+                $text = (string) ($seg['text'] ?? '');
+                if ($type === 'context') {
+                    $result[] = (substr($text, -1) === "\n") ? $text : ($text . "\n");
+                    $origConsumed++;
+                } elseif ($type === 'removed') {
+                    $origConsumed++;
+                } elseif ($type === 'added') {
+                    $result[] = (substr($text, -1) === "\n") ? $text : ($text . "\n");
+                }
+            }
+            $remainingStart = $startIdx + $origConsumed;
+            if ($remainingStart < count($fileLines)) {
+                $result = array_merge($result, array_slice($fileLines, $remainingStart));
+            }
+            return $result;
+        }
         
         // Remove old lines
         $linesToRemove = count($hunk->context) + count($hunk->removed);
