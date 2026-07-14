@@ -6,5 +6,5 @@ declare(strict_types=1);
  * Bumped by setup/git-hooks/bump_version_from_branch.py and update-release-latest.yml.
  */
 if (!defined('PATCHERLY_CONNECTOR_VERSION')) {
-    define('PATCHERLY_CONNECTOR_VERSION', '2.3.9');
+    define('PATCHERLY_CONNECTOR_VERSION', '2.3.12');
 }

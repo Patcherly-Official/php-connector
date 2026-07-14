@@ -1352,7 +1352,7 @@ class PHPAgent {
         $autoAnalyze = !empty($item['auto_analyze']);
         $autoApply = !empty($item['auto_apply']);
         $ingestedStatus = $item['status'] ?? 'pending';
-        if (!$autoAnalyze || in_array($ingestedStatus, ['ignored', 'excluded', 'dismissed', 'analysis_failed'], true)) {
+        if (!$autoAnalyze || in_array($ingestedStatus, ['ignored', 'excluded', 'fixed', 'analysis_failed'], true)) {
             echo "Auto-analysis not enabled or error skipped (status={$ingestedStatus}); stopping after ingest.\n";
             return;
         }
@@ -2485,7 +2485,7 @@ function patcherly_php_local_router() {
                  * Error IDs are short opaque tokens (uuid / hex / safe slugs).
                  * Reject anything that could affect URL structure or smuggle
                  * path segments before substituting into the upstream
-                 * /api/errors/{id}/(approve|dismiss) URL.
+                 * /api/errors/{id}/(approve|reject-patch) URL.
                  */
                 $approvalIdRe = '/^[A-Za-z0-9_-]{1,128}$/';
 
@@ -2628,7 +2628,7 @@ function patcherly_php_local_router() {
                     echo is_string($resp) && $resp !== '' ? $resp : '[]';
                     return;
                 }
-                if (preg_match('#^/local-approvals/([^/]+)/(approve|dismiss)$#', $path, $m)){
+                if (preg_match('#^/local-approvals/([^/]+)/(approve|reject-patch)$#', $path, $m)){
                     if (!$requireBearerToken()) { return; }
                     $id = $m[1]; $act = $m[2];
                     if (!preg_match($approvalIdRe, $id)) {
@@ -2638,8 +2638,21 @@ function patcherly_php_local_router() {
                     }
                     $sendSignedWithStatus = $reflection->getMethod('sendSignedWithStatus');
                     $sendSignedWithStatus->setAccessible(true);
-                    $apiPath = PatcherlyApiPaths::appPath('errors', rawurlencode($id), $act);
-                    [$resp, $code] = $sendSignedWithStatus->invoke($agent, 'POST', $apiPath, []);
+                    $payload = [];
+                    if ($act === 'reject-patch') {
+                        $rawBody = (string) file_get_contents('php://input');
+                        $decoded = $rawBody !== '' ? json_decode($rawBody, true) : null;
+                        $resolution = is_array($decoded) ? ($decoded['resolution'] ?? '') : '';
+                        $allowed = ['manual_suggestion', 'manual_own', 'not_needed'];
+                        if (!in_array($resolution, $allowed, true)) {
+                            http_response_code(400);
+                            echo json_encode(['error' => 'resolution required: manual_suggestion, manual_own, or not_needed']);
+                            return;
+                        }
+                        $payload = ['resolution' => $resolution];
+                    }
+                    $apiPath = PatcherlyApiPaths::appPath('errors', rawurlencode($id), $act === 'reject-patch' ? 'reject-patch' : 'approve');
+                    [$resp, $code] = $sendSignedWithStatus->invoke($agent, 'POST', $apiPath, $payload);
                     http_response_code($code ?: 200);
                     echo is_string($resp) && $resp !== '' ? $resp : '{}';
                     return;
@@ -2656,7 +2669,7 @@ function patcherly_php_local_router() {
  *     -> serve one HTTP request via patcherly_php_local_router(), then return
  *     so `php -S` can move on to the next connection. The router covers
  *     /api/file-content (Bearer token + project-root scope) and
- *     /local-approvals/{id}/(approve|dismiss) (Bearer token + id regex).
+ *     /local-approvals/{id}/(approve|reject-patch) (Bearer token + id regex).
  *
  *   - `cli` SAPI (i.e. plain `php php_agent.php`) -> run the long-lived
  *     poll loop: discover API URL, tail the application log file, send
