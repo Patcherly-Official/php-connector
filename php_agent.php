@@ -805,20 +805,38 @@ class PHPAgent {
         return $stripped;
     }
 
+    private function resolvePostApplyAllowedBinaries($fromApi) : array {
+        $floor = [
+            'php', 'php.exe', 'node', 'node.exe', 'npm', 'npm.cmd', 'npx', 'npx.cmd',
+            'yarn', 'yarn.cmd', 'python', 'python3', 'python.exe', 'py', 'py.exe',
+            'pip', 'pip3', 'pytest', 'composer', 'phpunit', 'pest', 'make', 'cargo', 'go',
+        ];
+        if (is_array($fromApi) && count($fromApi) > 0) {
+            $cleaned = [];
+            foreach ($fromApi as $x) {
+                $s = strtolower(trim((string)$x));
+                if ($s !== '') $cleaned[$s] = true;
+            }
+            if ($cleaned) return array_keys($cleaned);
+        }
+        return $floor;
+    }
+
     /**
      * Execute manifest steps; returns telemetry dict matching the Python and
      * Node connectors. Honors `dry_run` and `ignore_failure`. Each step is run
      * via proc_open with an argv array (no shell), and any shell metacharacters
      * in a string-form `run:` are rejected as `unsafe_shell_tokens` before
-     * tokenization.
+     * tokenization. Array and string forms both enforce the binary allowlist.
      */
-    private function runPostApplySteps(array $manifest, bool $dryRun) : array {
+    private function runPostApplySteps(array $manifest, bool $dryRun, $allowedBinariesFromApi = null) : array {
         $stepsIn = isset($manifest['steps']) && is_array($manifest['steps']) ? $manifest['steps'] : [];
         $wd = $manifest['working_directory'] ?? null;
         $rootCwd = $wd ? @realpath((string)$wd) : getcwd();
         if (!$rootCwd) $rootCwd = getcwd();
         $manifestDry = !empty($manifest['dry_run']);
         $effectiveDry = $dryRun || $manifestDry;
+        $allowedBins = array_fill_keys($this->resolvePostApplyAllowedBinaries($allowedBinariesFromApi), true);
 
         $logs = [];
         $stepResults = [];
@@ -855,7 +873,7 @@ class PHPAgent {
                         $rawRun
                     ), function ($p) { return trim($p) !== ''; }));
                 } else {
-                    // shell-token denylist (mirrors python_agent.py:1030).
+                    // shell-token denylist (mirrors python_agent.py).
                     $denylist = ['&&', '||', '|', ';', '`', '$(', '>', '<'];
                     foreach ($denylist as $tok) {
                         if (strpos($cmd, $tok) !== false) {
@@ -890,6 +908,34 @@ class PHPAgent {
                         return [
                             'failed' => true, 'ran' => true, 'dry_run' => false,
                             'steps' => $stepResults, 'message' => "empty command in {$name}",
+                        ];
+                    }
+                    continue;
+                }
+
+                $joined = implode(' ', $argv);
+                $denylist = ['&&', '||', '|', ';', '`', '$(', '>', '<'];
+                foreach ($denylist as $tok) {
+                    if (strpos($joined, $tok) !== false) {
+                        $stepResults[] = ['name' => $name, 'ok' => false, 'rc' => -4, 'error' => 'unsafe_shell_tokens'];
+                        if (!$ignoreFailure) {
+                            return [
+                                'failed' => true, 'ran' => true, 'dry_run' => false,
+                                'steps' => $stepResults, 'message' => "unsafe_command:{$name}",
+                                'log' => substr(implode("\n", $logs), -8000),
+                            ];
+                        }
+                        continue 2;
+                    }
+                }
+                $binBase = strtolower(basename((string)$argv[0]));
+                if (!isset($allowedBins[$binBase])) {
+                    $stepResults[] = ['name' => $name, 'ok' => false, 'rc' => -6, 'error' => 'binary_not_allowed'];
+                    if (!$ignoreFailure) {
+                        return [
+                            'failed' => true, 'ran' => true, 'dry_run' => false,
+                            'steps' => $stepResults, 'message' => "binary_not_allowed:{$name}:{$binBase}",
+                            'log' => substr(implode("\n", $logs), -8000),
                         ];
                     }
                     continue;
@@ -1076,7 +1122,11 @@ class PHPAgent {
             return ['ran' => false, 'skipped_reason' => 'restart_not_required'];
         }
 
-        $telemetry = $this->runPostApplySteps($manifest, $envDry);
+        $telemetry = $this->runPostApplySteps(
+            $manifest,
+            $envDry,
+            (isset($cfg['allowed_binaries']) && is_array($cfg['allowed_binaries'])) ? $cfg['allowed_binaries'] : null
+        );
         $telemetry['error_id'] = $errorId;
         if (empty($telemetry['failed']) && ($telemetry['ran'] ?? true) !== false) {
             $this->postApplySuccessErrorIds[$eid] = true;
@@ -2559,6 +2609,11 @@ function patcherly_php_local_router() {
                     if (!$payload || !isset($payload['file_path'])) {
                         http_response_code(400);
                         echo json_encode(['success' => false, 'error' => 'Missing file_path']);
+                        return;
+                    }
+                    if (!isset($payload['error_id']) || trim((string)$payload['error_id']) === '') {
+                        http_response_code(400);
+                        echo json_encode(['success' => false, 'error' => 'Missing error_id']);
                         return;
                     }
                     

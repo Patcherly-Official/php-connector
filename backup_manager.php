@@ -93,11 +93,35 @@ class AgentBackupManager {
             
             @file_put_contents($htaccess_file, $htaccess_content);
         }
+
+        // IIS deny (parity with WordPress storage_paths)
+        $web_config = $this->backupRoot . DIRECTORY_SEPARATOR . 'web.config';
+        if (!file_exists($web_config)) {
+            @file_put_contents(
+                $web_config,
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" .
+                "<configuration>\n" .
+                "  <system.webServer>\n" .
+                "    <authorization>\n" .
+                "      <deny users=\"*\" />\n" .
+                "    </authorization>\n" .
+                "  </system.webServer>\n" .
+                "</configuration>\n"
+            );
+        }
         
         // Also create index.php to prevent directory listing
         $index_file = $this->backupRoot . DIRECTORY_SEPARATOR . 'index.php';
         if (!file_exists($index_file)) {
             @file_put_contents($index_file, "<?php\n// Silence is golden.\n");
+        }
+
+        $normRoot = str_replace('\\', '/', rtrim($this->backupRoot, '/\\'));
+        if (preg_match('#/(public|www|htdocs|httpdocs)(/|$)#i', $normRoot)) {
+            error_log(
+                'Patcherly: backup root looks webroot-relative (' . $this->backupRoot .
+                '). Prefer PATCHERLY_BACKUP_ROOT outside the document root.'
+            );
         }
     }
     
