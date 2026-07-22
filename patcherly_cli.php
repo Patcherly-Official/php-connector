@@ -46,6 +46,8 @@ require_once __DIR__ . '/credential_store.php';
 require_once __DIR__ . '/oauth_client.php';
 require_once __DIR__ . '/lib/api_paths.php';
 require_once __DIR__ . '/connector_version.php';
+require_once __DIR__ . '/context_consent.php';
+require_once __DIR__ . '/context_collector.php';
 
 if (PHP_SAPI !== 'cli') {
     fwrite(STDERR, "patcherly_cli.php is meant to be run from the command line.\n");
@@ -54,6 +56,41 @@ if (PHP_SAPI !== 'cli') {
 
 function patcherly_cli_parse_args(array $argv): array
 {
+    // Nested: patcherly context get|set|upload [--tier VALUE] [--api-base URL] [--json]
+    if (isset($argv[1]) && $argv[1] === 'context') {
+        $opts = [
+            'cmd'      => 'context',
+            'api-base' => getenv('PATCHERLY_API_BASE') ?: 'https://api.patcherly.com',
+            'client-id' => getenv('PATCHERLY_CLIENT_ID') ?: 'patcherly-connector-php',
+            'json'     => false,
+            'context-cmd' => null,
+            'tier'     => null,
+        ];
+        for ($i = 2; $i < count($argv); $i++) {
+            $a = $argv[$i];
+            if (strpos($a, '--') === 0) {
+                $eq = strpos($a, '=');
+                if ($eq !== false) {
+                    $key = substr($a, 2, $eq - 2);
+                    $val = substr($a, $eq + 1);
+                    $opts[$key] = $val;
+                } else {
+                    $key = substr($a, 2);
+                    if (isset($argv[$i + 1]) && strpos($argv[$i + 1], '--') !== 0) {
+                        $opts[$key] = $argv[++$i];
+                    } else {
+                        $opts[$key] = true;
+                    }
+                }
+            } elseif (in_array($a, ['get', 'set', 'upload'], true) && $opts['context-cmd'] === null) {
+                $opts['context-cmd'] = $a;
+            } elseif (in_array($a, ['full', 'minimal', 'off'], true) && $opts['tier'] === null) {
+                $opts['tier'] = $a;
+            }
+        }
+        return $opts;
+    }
+
     $cmd = 'help';
     $opts = [
         'api-base'     => getenv('PATCHERLY_API_BASE') ?: 'https://api.patcherly.com',
@@ -81,7 +118,7 @@ function patcherly_cli_parse_args(array $argv): array
                     $opts[$key] = true;
                 }
             }
-        } elseif (in_array($a, ['login', 'logout', 'status', 'refresh', 'heartbeat', 'send-test', 'help'], true)) {
+        } elseif (in_array($a, ['login', 'logout', 'status', 'refresh', 'heartbeat', 'send-test', 'context', 'help'], true)) {
             $cmd = $a;
         }
     }
@@ -114,42 +151,113 @@ function patcherly_cli_upload_context_after_pairing(array $opts, array $bundle):
     if (empty($bundle['access_token']) || empty($bundle['hmac_secret'])) {
         return;
     }
-    $contextData = [
-        'runtime' => 'php',
-        'version' => PHP_VERSION,
-        'sapi' => PHP_SAPI,
-        'platform' => PHP_OS,
-        'cwd' => getcwd() ?: '',
-        'framework' => ['detected' => 'none'],
-        'collected_at' => gmdate('c'),
-        'patcherly_connector_version' => PATCHERLY_CONNECTOR_VERSION,
-    ];
-    $payload = json_encode([
-        'context_type' => 'php',
-        'context_data' => $contextData,
-        'server_context' => ['platform' => $contextData['platform'], 'runtime' => $contextData['runtime']],
-    ]);
-    if (!is_string($payload)) {
+    try {
+        [$tier] = patcherly_get_context_consent();
+        if ($tier === 'off') {
+            return;
+        }
+
+        $collector   = new Patcherly_PHPContextCollector();
+        $contextData = ($tier === 'full') ? $collector->collect_all() : $collector->collect_minimal();
+        $contextData['context_mode']                = $tier;
+        $contextData['patcherly_connector_version'] = PATCHERLY_CONNECTOR_VERSION;
+
+        $server  = is_array($contextData['server'] ?? null) ? $contextData['server'] : [];
+        $payload = json_encode([
+            'context_type'   => 'php',
+            'context_data'   => $contextData,
+            'server_context' => [
+                'platform' => $server['os'] ?? PHP_OS,
+                'runtime'  => 'php',
+            ],
+        ]);
+        if (!is_string($payload)) {
+            return;
+        }
+
+        $path = PatcherlyApiPaths::NAMED_CONTEXT_UPLOAD;
+        $url  = rtrim((string) $opts['api-base'], '/') . $path;
+        $ch   = curl_init($url);
+        if ($ch === false) {
+            return;
+        }
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST           => true,
+            CURLOPT_POSTFIELDS     => $payload,
+            CURLOPT_HTTPHEADER     => array_merge(
+                patcherly_cli_sign_headers($bundle, 'POST', $path, $payload),
+                ['User-Agent: patcherly-connector-php/login']
+            ),
+            CURLOPT_TIMEOUT => 15,
+        ]);
+        $raw    = curl_exec($ch);
+        $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        curl_close($ch);
+        if ($status === 413) {
+            fwrite(STDERR, "[patcherly] Context upload rejected (413 payload too large); try minimal consent\n");
+        }
+    } catch (\Throwable $e) {
+        // Non-critical — soft-fail
+    }
+}
+
+/**
+ * Handle `patcherly context get|set|upload`.
+ */
+function patcherly_cli_context_cmd(array $opts): void
+{
+    $action = $opts['context-cmd'] ?? null;
+
+    if ($action === 'get') {
+        [$tier, $source] = patcherly_get_context_consent();
+        if (!empty($opts['json'])) {
+            fwrite(STDOUT, json_encode(['tier' => $tier, 'source' => $source], JSON_PRETTY_PRINT) . "\n");
+        } else {
+            fwrite(STDOUT, "context consent: {$tier} (source: {$source})\n");
+        }
         return;
     }
-    $path = PatcherlyApiPaths::NAMED_CONTEXT_UPLOAD;
-    $url = rtrim((string) $opts['api-base'], '/') . $path;
-    $ch = curl_init($url);
-    if ($ch === false) {
+
+    if ($action === 'set') {
+        $tier = $opts['tier'] ?? null;
+        if ($tier === null) {
+            fwrite(STDERR, "usage: patcherly context set full|minimal|off\n");
+            exit(2);
+        }
+        try {
+            $normalized = patcherly_set_context_consent($tier);
+        } catch (\InvalidArgumentException $e) {
+            fwrite(STDERR, 'patcherly: ' . $e->getMessage() . "\n");
+            exit(2);
+        }
+        if (!empty($opts['json'])) {
+            fwrite(STDOUT, json_encode(['tier' => $normalized, 'source' => 'file'], JSON_PRETTY_PRINT) . "\n");
+        } else {
+            fwrite(STDOUT, "context consent set to {$normalized} (saved to cache file).\n");
+            fwrite(STDOUT, "Next agent/CLI context upload will use this tier (env PATCHERLY_CONTEXT_CONSENT still wins if set).\n");
+        }
         return;
     }
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_POST => true,
-        CURLOPT_POSTFIELDS => $payload,
-        CURLOPT_HTTPHEADER => array_merge(
-            patcherly_cli_sign_headers($bundle, 'POST', $path, $payload),
-            ['User-Agent: patcherly-connector-php/login']
-        ),
-        CURLOPT_TIMEOUT => 15,
-    ]);
-    curl_exec($ch);
-    curl_close($ch);
+
+    if ($action === 'upload') {
+        $store  = new PatcherlyCredentialStore();
+        $bundle = $store->load();
+        if ($bundle === null || empty($bundle['access_token'])) {
+            fwrite(STDERR, "patcherly: not paired — run login first\n");
+            exit(2);
+        }
+        patcherly_cli_upload_context_after_pairing($opts, $bundle);
+        if (!empty($opts['json'])) {
+            fwrite(STDOUT, json_encode(['ok' => true], JSON_PRETTY_PRINT) . "\n");
+        } else {
+            fwrite(STDOUT, "context upload attempted (see agent/API logs if it failed silently).\n");
+        }
+        return;
+    }
+
+    fwrite(STDERR, "usage: patcherly context get|set|upload\n");
+    exit(2);
 }
 
 function patcherly_cli_login(array $opts): void
@@ -507,9 +615,14 @@ try {
         case 'send-test':
             patcherly_cli_send_test($opts);
             break;
+        case 'context':
+            patcherly_cli_context_cmd($opts);
+            break;
         case 'help':
         default:
-            fwrite(STDOUT, "Usage: php patcherly_cli.php <login|logout|status|refresh|heartbeat|send-test> [--api-base URL] [--client-id ID] [--json] [--no-preflight]\n");
+            fwrite(STDOUT, "Usage: php patcherly_cli.php <login|logout|status|refresh|heartbeat|send-test|context> [--api-base URL] [--client-id ID] [--json] [--no-preflight]\n");
+            fwrite(STDOUT, "       php patcherly_cli.php context <get|set|upload> [--json]\n");
+            fwrite(STDOUT, "       php patcherly_cli.php context set full|minimal|off\n");
     }
 } catch (Throwable $e) {
     fwrite(STDERR, "patcherly: " . $e->getMessage() . "\n");

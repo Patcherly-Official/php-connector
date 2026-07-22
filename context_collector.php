@@ -271,9 +271,26 @@ class Patcherly_PHPContextCollector {
         return false;
     }
 
+    /**
+     * Runtime + OS + framework only (no packages / extensions / env dumps).
+     * Mirrors PythonContextCollector.collect_minimal().
+     */
+    public function collect_minimal(): array {
+        return [
+            'server'       => $this->collect_server_info(),
+            'php'          => $this->collect_php_info(),
+            'framework'    => $this->detect_framework(),
+            'collected_at' => date('Y-m-d H:i:s'),
+        ];
+    }
+
     // Canonical connector parity aliases (non-breaking).
     public function collectAll(): array {
         return $this->collect_all();
+    }
+
+    public function collectMinimal(): array {
+        return $this->collect_minimal();
     }
 
     public function saveContext(): bool {

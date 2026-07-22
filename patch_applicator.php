@@ -516,8 +516,9 @@ class PatchApplicator {
          */
         $hunkHeader = rtrim($lines[$startIdx], "\r\n");
         
-        // Parse hunk header: @@ -orig_start,orig_len +new_start,new_len @@
-        if (!preg_match('/^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@$/', $hunkHeader, $matches)) {
+        // Parse hunk header: @@ -orig_start,orig_len +new_start,new_len @@ [optional section]
+        // Optional trailing text after the second @@ is valid unified-diff (git style).
+        if (!preg_match('/^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@/', $hunkHeader, $matches)) {
             throw new PatchParseError("Invalid hunk header: {$hunkHeader}");
         }
         

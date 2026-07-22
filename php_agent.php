@@ -161,8 +161,7 @@ class PHPAgent {
     /** @var array|null OAuth credential bundle (access_token, refresh_token, hmac_secret, ...). */
     private $oauthCreds = null;
     private $oauthCredFile = null;
-    private $oauthClientId = 'patcherly-connector';
-    private $oauthResolved = false;
+    private $oauthClientId = 'patcherly-connector-php';
 
     /**
      * Per-process set of error_ids for which post-apply steps already succeeded.
@@ -180,7 +179,7 @@ class PHPAgent {
         $this->serverUrl = patcherly_agent_configured_server_url();
         $this->idsPath = getenv('PATCHERLY_IDS_PATH') ?: 'patcherly_ids.json';
         $this->queuePath = getenv('PATCHERLY_QUEUE_PATH') ?: 'patcherly_queue.jsonl';
-        $this->oauthClientId = getenv('PATCHERLY_OAUTH_CLIENT_ID') ?: 'patcherly-connector';
+        $this->oauthClientId = getenv('PATCHERLY_OAUTH_CLIENT_ID') ?: getenv('PATCHERLY_CLIENT_ID') ?: 'patcherly-connector-php';
         $defaultCredFile = (getenv('HOME') ?: getenv('USERPROFILE') ?: sys_get_temp_dir()) . DIRECTORY_SEPARATOR . '.patcherly' . DIRECTORY_SEPARATOR . 'credentials.json';
         $this->oauthCredFile = getenv('PATCHERLY_CREDENTIAL_FILE') ?: $defaultCredFile;
         if (!file_exists('logs')) { mkdir('logs', 0777, true); }
@@ -202,7 +201,11 @@ class PHPAgent {
 
     /**
      * Fetch enabled log paths from GET /api/targets/{target_id}/log-paths/connector.
-     * Stores ALL returned paths in $serverLogPaths and sets $logFile to the first non-empty path.
+     * Stores ALL returned paths in $serverLogPaths and picks a primary $logFile:
+     * ``DEMO_LOG_PATH`` (if set and readable), else the first server path that
+     * exists and is readable, else the first server path (wait for create).
+     * Without this, PHP preset order puts ``/var/log/apache2/error.log`` first and
+     * local Docker demos that write ``/app/logs/error.log`` never get tailed.
      */
     private function fetchLogPathsFromServer() : void {
         if (!$this->targetId) {
@@ -219,12 +222,39 @@ class PHPAgent {
                 : [];
             if ($paths) {
                 $this->serverLogPaths = $paths;
-                $this->logFile = $paths[0];
+                $this->logFile = $this->pickPrimaryLogPath($paths);
                 echo 'Using server-provided log paths: ' . implode(', ', $paths) . "\n";
+                echo "Primary monitor: {$this->logFile}\n";
             }
         } catch (\Throwable $e) {
             // Silently fail, keep default log file
         }
+    }
+
+    /**
+     * Choose which path ``monitorLogs`` should tail.
+     *
+     * @param list<string> $paths
+     */
+    private function pickPrimaryLogPath(array $paths): string {
+        $demo = getenv('DEMO_LOG_PATH');
+        if (is_string($demo) && $demo !== '' && is_readable($demo)) {
+            return $demo;
+        }
+        foreach ($paths as $path) {
+            if (!is_string($path) || $path === '') {
+                continue;
+            }
+            $abs = (strpos($path, '/') === 0 || preg_match('#^[A-Za-z]:[\\\\/]#', $path))
+                ? $path
+                : (getcwd() . DIRECTORY_SEPARATOR . ltrim(str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $path), '/\\'));
+            if (is_readable($abs)) {
+                // Prefer the server-relative form when that is what the API sent
+                // (cwd is /app in the demo agent), otherwise the absolute path.
+                return is_readable($path) ? $path : $abs;
+            }
+        }
+        return $paths[0];
     }
 
     /**
@@ -345,7 +375,16 @@ class PHPAgent {
 
         foreach ($lines as $line) {
             $stripped = trim($line);
-            $isContinuation = count($current) > 0 && ($stripped === '' || strpos($line, '  ') === 0 || strpos($line, "\t") === 0 || preg_match('/^\s+at\s+/', $line) || (strlen($stripped) > 0 && $stripped[0] === '#') || preg_match($pythonExceptionLine, $stripped));
+            $isContinuation = count($current) > 0 && (
+                $stripped === ''
+                || strpos($line, '  ') === 0
+                || strpos($line, "\t") === 0
+                || preg_match('/^\s+at\s+/', $line)
+                || (strlen($stripped) > 0 && $stripped[0] === '#')
+                || preg_match($pythonExceptionLine, $stripped)
+                || preg_match('/^[\s^~]+$/', rtrim($line, "\r\n"))
+                || ($stripped !== '' && preg_match('/^[\^~]+$/', $stripped))
+            );
             $isStart = (bool) preg_match($startOrCont, $line) || preg_match($errorWord, $stripped);
             if ($isContinuation) {
                 $current[] = $line;
@@ -589,25 +628,41 @@ class PHPAgent {
         $now = time();
         if (!$force && $now - $this->contextLastUpload < $this->contextUploadTtl) return;
         try {
-            $contextData = [
-                'runtime' => 'php',
-                'version' => PHP_VERSION,
-                'sapi' => PHP_SAPI,
-                'platform' => PHP_OS,
-                'cwd' => getcwd() ?: '',
-                'framework' => ['detected' => $this->detectFrameworkForIngest() ?? 'none'],
-                'collected_at' => date('c'),
-                'patcherly_connector_version' => PATCHERLY_CONNECTOR_VERSION,
-            ];
+            require_once __DIR__ . '/context_consent.php';
+            require_once __DIR__ . '/context_collector.php';
+
+            [$tier] = patcherly_get_context_consent();
+            if ($tier === 'off') {
+                error_log('[patcherly] Context upload skipped (consent=off)');
+                $this->contextLastUpload = $now;
+                return;
+            }
+
+            $collector  = new Patcherly_PHPContextCollector();
+            $contextData = ($tier === 'full') ? $collector->collect_all() : $collector->collect_minimal();
+            $contextData['context_mode']                 = $tier;
+            $contextData['patcherly_connector_version']  = PATCHERLY_CONNECTOR_VERSION;
+
+            $server  = is_array($contextData['server'] ?? null) ? $contextData['server'] : [];
             $payload = [
-                'context_type' => 'php',
-                'context_data' => $contextData,
-                'server_context' => ['platform' => $contextData['platform'], 'runtime' => $contextData['runtime']],
+                'context_type'   => 'php',
+                'context_data'   => $contextData,
+                'server_context' => [
+                    'platform' => $server['os'] ?? PHP_OS,
+                    'runtime'  => 'php',
+                ],
             ];
-            $this->sendSigned('POST', PatcherlyApiPaths::NAMED_CONTEXT_UPLOAD, $payload);
-            $this->contextLastUpload = $now;
+            [, $statusCode] = $this->sendSignedWithStatus('POST', PatcherlyApiPaths::NAMED_CONTEXT_UPLOAD, $payload);
+            if ($statusCode === 413) {
+                error_log('[patcherly] Context upload rejected (413 payload too large); try minimal consent');
+                return;
+            }
+            if ($statusCode >= 200 && $statusCode < 300) {
+                $this->contextLastUpload = $now;
+            }
         } catch (\Throwable $e) {
-            // Non-critical
+            // Non-critical — soft-fail, never crash agent
+            error_log('[patcherly] Context upload skipped: ' . $e->getMessage());
         }
     }
 
@@ -621,8 +676,10 @@ class PHPAgent {
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Fetch the signed post-apply manifest JSON for the current target.
-     * Returns null on any transport/HMAC failure so callers omit `post_apply`.
+     * Fetch post-apply manifest JSON for the current target.
+     * Request is OAuth+HMAC signed; response is plain JSON (API does not sign
+     * post-apply-config/connector — unlike GET /fix). Returns null on transport
+     * failure so callers omit `post_apply`.
      */
     private function getPostApplyConnectorJson() {
         if (!$this->targetId) return null;
@@ -638,12 +695,6 @@ class PHPAgent {
         $body = $this->sendGet($url, $headers, $respHeaders, $statusCode);
         if ($body === false || $statusCode < 200 || $statusCode >= 300) {
             error_log('[patcherly] post-apply config fetch failed: status=' . $statusCode);
-            return null;
-        }
-        $sig = $respHeaders['X-Patcherly-Signature'] ?? null;
-        $ts = $respHeaders['X-Patcherly-Timestamp'] ?? null;
-        if (!$this->verifyResponseHmac('GET', $path, $body, $sig, $ts)) {
-            error_log('[patcherly] post-apply connector response HMAC failed — skipping post_apply');
             return null;
         }
         $decoded = json_decode($body, true);
@@ -1175,7 +1226,7 @@ class PHPAgent {
      * connectors/php/tests/post_apply_steps_test.php — does NOT do any
      * network I/O. The networked POST happens in runTestsAndReport().
      *
-     * @return array Payload ready for POST to /api/errors/{id}/test/results.
+     * @return array Payload ready for POST to /v1/errors/{id}/test/results.
      */
     private function buildTestResultsPayload(string $errorId, bool $applySuccess) : array {
         $detected = $this->detectPhpTestRunner();
@@ -1472,8 +1523,8 @@ class PHPAgent {
         }
         
         // Verify HMAC signature (MANDATORY - always required)
-        $responseSignature = $responseHeaders['X-Patcherly-Signature'] ?? null;
-        $responseTimestamp = $responseHeaders['X-Patcherly-Timestamp'] ?? null;
+        $responseSignature = $responseHeaders['x-patcherly-signature'] ?? null;
+        $responseTimestamp = $responseHeaders['x-patcherly-timestamp'] ?? null;
         if (!$this->verifyResponseHmac('GET', $path3, $r3, $responseSignature, $responseTimestamp)) {
             throw new Exception("HMAC signature verification failed for fix response - patch rejected for security");
         }
@@ -1510,8 +1561,7 @@ class PHPAgent {
             $applyPayload = [
                 'success' => $success,
                 'fix_path' => $this->logFile,
-                'test_result' => $applyResult['message'] ?? ($success ? 'Fix passed local tests.' : 'Fix failed or rolled back.')
-            ];
+                'message' => $applyResult['message'] ?? ($success ? 'Fix passed local tests.' : 'Fix failed or rolled back.'),            ];
             if ($targetDryRun) {
                 $applyPayload['dry_run'] = true;
             }
@@ -1602,11 +1652,88 @@ class PHPAgent {
         return !empty($files) ? $files : [$this->logFile];
     }
 
+    /**
+     * Resolve a patch path to an absolute file under cwd / PATCHERLY_TARGET_ROOTS.
+     *
+     * AI diffs often use paths like ``app/Logic.php`` while the Docker demo agent
+     * already has cwd ``/app`` — without stripping the redundant root segment,
+     * backup/apply look for ``/app/app/Logic.php`` and refuse the path.
+     */
+    /**
+     * Resolve a patch path under cwd / PATCHERLY_TARGET_ROOTS.
+     * Handles cwd basename matching the first path segment (e.g. cwd `/app` +
+     * diff `app/Logic.php` → `/app/Logic.php`). Existence-based — not localhost-only.
+     * Prefers exact nested paths; does not fall back to bare basename (wrong-file risk).
+     */
+    private function resolvePatchTargetPath(string $filePath): string {
+        $filePath = str_replace('\\', '/', trim($filePath));
+        if ($filePath === '' || $filePath === '/dev/null') {
+            return $filePath;
+        }
+
+        $roots = [];
+        $configured = getenv('PATCHERLY_TARGET_ROOTS') ?: '';
+        foreach (array_filter(array_map('trim', explode(PATH_SEPARATOR, $configured))) as $root) {
+            $resolved = realpath($root) ?: $root;
+            if ($resolved && !in_array($resolved, $roots, true)) {
+                $roots[] = $resolved;
+            }
+        }
+        $cwdReal = realpath(getcwd() ?: '.') ?: (getcwd() ?: '.');
+        if ($cwdReal && !in_array($cwdReal, $roots, true)) {
+            $roots[] = $cwdReal;
+        }
+
+        $strippedUnder = static function (string $root, string $normalized): ?string {
+            $rootBase = basename(rtrim(str_replace('\\', '/', $root), '/'));
+            if ($rootBase !== '' && strpos($normalized, $rootBase . '/') === 0) {
+                return rtrim($root, '/\\') . DIRECTORY_SEPARATOR . substr($normalized, strlen($rootBase) + 1);
+            }
+            return null;
+        };
+
+        $candidates = [
+            $filePath,
+            $cwdReal . DIRECTORY_SEPARATOR . ltrim($filePath, '/'),
+            __DIR__ . '/' . $filePath,
+            __DIR__ . '/src/' . $filePath,
+            __DIR__ . '/app/' . $filePath,
+        ];
+        foreach ($roots as $root) {
+            $candidates[] = $root . DIRECTORY_SEPARATOR . ltrim($filePath, '/');
+            $stripped = $strippedUnder((string)$root, $filePath);
+            if ($stripped !== null) {
+                $candidates[] = $stripped;
+            }
+        }
+
+        foreach ($candidates as $candidate) {
+            if ($candidate && @file_exists($candidate)) {
+                $real = realpath($candidate);
+                if ($real !== false) {
+                    return $real;
+                }
+            }
+        }
+
+        foreach ($roots as $root) {
+            $stripped = $strippedUnder((string)$root, $filePath);
+            if ($stripped !== null) {
+                return $stripped;
+            }
+        }
+        return rtrim((string)$cwdReal, '/\\') . DIRECTORY_SEPARATOR . ltrim($filePath, '/');
+    }
+
     public function applyFix($fix, $errorId = null, $dryRun = false) {
         echo "Applying fix (dry_run=" . ($dryRun ? 'true' : 'false') . "): " . substr($fix, 0, 100) . "...\n";
         
-        // Extract file paths from fix
-        $filesToBackup = $this->extractFilesFromFix($fix);
+        // Extract file paths from fix — resolve before backup so allow-list checks
+        // see /app/Logic.php rather than a cwd-relative app/Logic.php miss.
+        $filesToBackup = [];
+        foreach ($this->extractFilesFromFix($fix) as $rawPath) {
+            $filesToBackup[] = $this->resolvePatchTargetPath((string)$rawPath);
+        }
         
         // Create backup before applying fix
         $backupMetadata = null;
@@ -1633,32 +1760,7 @@ class PHPAgent {
                 
                 // Apply patches to each file
                 foreach ($filePatches as $filePatch) {
-                    $filePath = $filePatch->filePath;
-                    
-                    // Resolve absolute path if relative
-                    if (!pathinfo($filePath, PATHINFO_DIRNAME) || !realpath($filePath)) {
-                        // Try to find file in current directory or common locations
-                        $candidates = [
-                            $filePath,
-                            __DIR__ . '/' . $filePath,
-                            __DIR__ . '/src/' . $filePath,
-                            __DIR__ . '/app/' . $filePath,
-                        ];
-                        $found = false;
-                        foreach ($candidates as $candidate) {
-                            if (file_exists($candidate)) {
-                                $filePath = realpath($candidate);
-                                $found = true;
-                                break;
-                            }
-                        }
-                        if (!$found) {
-                            // Use relative path as-is (will create if needed)
-                            $filePath = realpath(__DIR__) . '/' . $filePatch->filePath;
-                        }
-                    } else {
-                        $filePath = realpath($filePath) ?: $filePath;
-                    }
+                    $filePath = $this->resolvePatchTargetPath((string)$filePatch->filePath);
 
                     if ($this->isPathExcluded((string)$filePath)) {
                         throw new PatchApplyError("Refusing to apply patch to excluded path: {$filePath}");
@@ -1828,14 +1930,20 @@ class PHPAgent {
         return $body;
     }
     /**
-     * Phase-4 (v1.46) — Resolve OAuth credentials once, cache for the process.
-     * Returns the credential bundle on success, ``null`` if no credentials are
-     * available (the caller must short-circuit with a "run patcherly login" hint).
+     * Phase-4 (v1.46) — Resolve OAuth credentials, cache on success.
+     *
+     * Negative results are NOT cached: operators often start the agent before
+     * ``patcherly login`` writes ``credentials.json``. Re-stat the file on each
+     * call until a valid bundle is loaded (then cache for the process lifetime;
+     * refresh updates ``$this->oauthCreds`` in place).
      */
     private function resolveOAuthCreds(): ?array {
-        if ($this->oauthResolved) return $this->oauthCreds;
-        $this->oauthResolved = true;
-        if (!$this->oauthCredFile || !is_file($this->oauthCredFile)) return null;
+        if ($this->oauthCreds !== null) {
+            return $this->oauthCreds;
+        }
+        if (!$this->oauthCredFile || !is_file($this->oauthCredFile)) {
+            return null;
+        }
         $raw = @file_get_contents($this->oauthCredFile);
         if ($raw === false) {
             error_log("[patcherly] credential file unreadable: {$this->oauthCredFile}");
@@ -2179,11 +2287,13 @@ class PHPAgent {
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
         curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
+        // Uvicorn/Starlette emit lowercase header names; Node/Python clients are
+        // case-insensitive, but this map is not — always store keys lowercased.
         curl_setopt($ch, CURLOPT_HEADERFUNCTION, function($ch, $header) use (&$responseHeaders) {
             $len = strlen($header);
             $header = explode(':', $header, 2);
             if (count($header) < 2) return $len;
-            $responseHeaders[trim($header[0])] = trim($header[1]);
+            $responseHeaders[strtolower(trim($header[0]))] = trim($header[1]);
             return $len;
         });
         $response = curl_exec($ch);
@@ -2306,8 +2416,8 @@ class PHPAgent {
             if ($fixHttpCode < 200 || $fixHttpCode >= 300) {
                 return;
             }
-            $responseSignature = $responseHeaders['X-Patcherly-Signature'] ?? null;
-            $responseTimestamp = $responseHeaders['X-Patcherly-Timestamp'] ?? null;
+            $responseSignature = $responseHeaders['x-patcherly-signature'] ?? null;
+            $responseTimestamp = $responseHeaders['x-patcherly-timestamp'] ?? null;
             if (!$this->verifyResponseHmac('GET', $path3, $r3, $responseSignature, $responseTimestamp)) {
                 error_log('Patcherly: HMAC verification failed for approved fix ' . $errorId);
                 return;
@@ -2335,7 +2445,7 @@ class PHPAgent {
             $applyPayload = [
                 'success' => $success,
                 'fix_path' => $this->logFile,
-                'test_result' => $applyResult['message'] ?? ($success ? 'Fix passed local tests.' : 'Fix failed or rolled back.'),
+                'message' => $applyResult['message'] ?? ($success ? 'Fix passed local tests.' : 'Fix failed or rolled back.'),
             ];
             if ($targetDryRun) {
                 $applyPayload['dry_run'] = true;
@@ -2382,7 +2492,7 @@ class PHPAgent {
      * Pick up errors that the API has transitioned to ``rolling_back`` because
      * an operator clicked **Rollback** in the dashboard, restore the affected
      * files from the local pre-apply backup, and report the outcome to
-     * ``POST /api/errors/{id}/fix/rollback``. Without this poll, dashboard-
+     * ``POST /v1/errors/{id}/fix/rollback``. Without this poll, dashboard-
      * initiated rollback would stall server-side.
      */
     public function processRollingBackErrors() : void {
@@ -2535,7 +2645,7 @@ function patcherly_php_local_router() {
                  * Error IDs are short opaque tokens (uuid / hex / safe slugs).
                  * Reject anything that could affect URL structure or smuggle
                  * path segments before substituting into the upstream
-                 * /api/errors/{id}/(approve|reject-patch) URL.
+                 * /v1/errors/{id}/(approve|reject-patch) URL.
                  */
                 $approvalIdRe = '/^[A-Za-z0-9_-]{1,128}$/';
 
