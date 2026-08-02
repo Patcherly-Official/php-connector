@@ -4,10 +4,10 @@
  * Monitors log files for errors, sends error context to a central server,
  * applies fixes and rolls back changes if necessary.
  * 
- * This script simulates the behavior similar to connectors/python_agent.py
+ * This script simulates the behavior similar to connectors/patcherly_agent.py
  * using PHP. It's designed to run in a resource-constrained environment.
  * 
- * Usage: php php_agent.php [poll_interval_in_seconds]
+ * Usage: php patcherly_agent.php [poll_interval_in_seconds]
  */
 
 // Default API URL for auto-discovery fallback (production; proxy only for legacy shared-host)
@@ -15,6 +15,8 @@ define('DEFAULT_API_URL', 'https://api.patcherly.com');
 require_once __DIR__ . '/lib/ingest_severity.php';
 require_once __DIR__ . '/lib/file_context_reader.php';
 require_once __DIR__ . '/lib/api_paths.php';
+require_once __DIR__ . '/lib/error_event_extract.php';
+require_once __DIR__ . '/lib/http_error_detail.php';
 
 /**
  * True when the operator pinned the API host via SERVER_URL or PATCHERLY_API_BASE.
@@ -155,6 +157,7 @@ class PHPAgent {
     private $excludePaths = [];
     private $excludePathsCacheTime = 0;
     private $excludePathsCacheTtl = 300; // 5 minutes
+    private $lastReconnectNudgeAt = null;
     // Context upload throttle
     private $contextLastUpload = 0;
     private $contextUploadTtl = 300;
@@ -173,6 +176,9 @@ class PHPAgent {
      * @var array<string,bool>
      */
     private $postApplySuccessErrorIds = [];
+
+    /** @var array{pending: string[], since: float|null} */
+    private $logEventCarryState = ['pending' => [], 'since' => null];
 
     public function __construct() {
         // Priority: env > default
@@ -332,8 +338,9 @@ class PHPAgent {
      * @return string[]
      */
     private function splitLogOccurrences(string $text) : array {
-        $text = trim($text);
-        if ($text === '') {
+        // Preserve leading whitespace for stack-frame continuation detection.
+        $text = rtrim($text, "\r\n");
+        if (trim($text) === '') {
             return [];
         }
         $parts = preg_split(
@@ -345,8 +352,8 @@ class PHPAgent {
         }
         $out = [];
         foreach ($parts as $part) {
-            $part = trim((string) $part);
-            if ($part !== '') {
+            $part = rtrim((string) $part, "\r\n");
+            if (trim($part) !== '') {
                 $out[] = $part;
             }
         }
@@ -359,53 +366,9 @@ class PHPAgent {
      * @return string[]
      */
     private function extractErrorEvents(array $lines) : array {
-        $events = [];
-        $current = [];
-        $startOrCont = '/^(Traceback\s|File\s+["\']|Exception:|Error:\s|PHP\s+(?:Fatal|Parse|Warning|Notice|Deprecated)|^\s+at\s+|\s*#\d+\s+)/i';
-        $errorWord = '/\b(error|exception|traceback|fatal)\b/i';
-        // Python exception type line (e.g. "ValueError: bad") — treat as continuation when in a block
-        $pythonExceptionLine = '/^\w+(?:Error|Exception):\s/i';
-
-        $flush = function () use (&$current, &$events) {
-            if (count($current) > 0) {
-                $events[] = implode('', $current);
-                $current = [];
-            }
-        };
-
-        foreach ($lines as $line) {
-            $stripped = trim($line);
-            $isContinuation = count($current) > 0 && (
-                $stripped === ''
-                || strpos($line, '  ') === 0
-                || strpos($line, "\t") === 0
-                || preg_match('/^\s+at\s+/', $line)
-                || (strlen($stripped) > 0 && $stripped[0] === '#')
-                || preg_match($pythonExceptionLine, $stripped)
-                || preg_match('/^[\s^~]+$/', rtrim($line, "\r\n"))
-                || ($stripped !== '' && preg_match('/^[\^~]+$/', $stripped))
-            );
-            $isStart = (bool) preg_match($startOrCont, $line) || preg_match($errorWord, $stripped);
-            if ($isContinuation) {
-                $current[] = $line;
-            } elseif ($isStart) {
-                $flush();
-                $current[] = $line;
-            } elseif (count($current) > 0 && $stripped === '') {
-                $flush();
-            } elseif (count($current) > 0) {
-                $flush();
-            }
-        }
-        $flush();
-        if (count($events) === 0) {
-            $errorLines = array_filter($lines, function ($l) {
-                return preg_match('/\b(error|exception|traceback|fatal|critical|failed|failure|rejection)\b/i', $l) === 1
-                    || preg_match('/^\s*\w+(Error|Exception):/i', $l) === 1;
-            });
-            if (count($errorLines) > 0) {
-                $events[] = implode('', $errorLines);
-            }
+        [$events, $leftover] = patcherly_extract_error_events($lines, false);
+        if ($leftover !== []) {
+            $events[] = implode('', $leftover);
         }
         return $events;
     }
@@ -553,6 +516,11 @@ class PHPAgent {
             if (!$this->isProtectionModeStandby()) {
                 clearstatcache();
                 $currentSize = file_exists($this->logFile) ? filesize($this->logFile) : 0;
+                if ($currentSize < $lastSize) {
+                    $lastSize = 0;
+                    $this->logEventCarryState = ['pending' => [], 'since' => null];
+                }
+                $expanded = [];
                 if ($currentSize > $lastSize) {
                     $handle = @fopen($this->logFile, 'r');
                     if ($handle === false) {
@@ -567,18 +535,20 @@ class PHPAgent {
                     }
                     fclose($handle);
                     $lastSize = $currentSize;
-                    $expanded = [];
                     foreach ($newLines as $line) {
                         foreach ($this->splitLogOccurrences(rtrim((string) $line, "\r\n")) as $occurrence) {
                             $expanded[] = $occurrence . "\n";
                         }
                     }
-                    $events = $this->extractErrorEvents($expanded);
-                    foreach ($events as $event) {
-                        if (trim($event) !== '') {
-                            echo "Error detected: " . substr(trim($event), 0, 100) . "...\n";
-                            $this->processError($event);
-                        }
+                }
+                [$events, $this->logEventCarryState] = patcherly_ingest_log_lines_with_carry(
+                    $this->logEventCarryState,
+                    $expanded
+                );
+                foreach ($events as $event) {
+                    if (trim($event) !== '') {
+                        echo "Error detected: " . substr(trim($event), 0, 100) . "...\n";
+                        $this->processError($event);
                     }
                 }
             }
@@ -670,7 +640,7 @@ class PHPAgent {
     // Post-apply manifest support (C1)
     //
     // Mirrors `_get_post_apply_connector_json` / `_run_post_apply_steps` /
-    // `_maybe_run_post_apply` in connectors/python/python_agent.py. PHP uses
+    // `_maybe_run_post_apply` in connectors/python/patcherly_agent.py. PHP uses
     // proc_open with an argv array (PHP 7.4+) so we never invoke a shell, and
     // a hardcoded shell-token denylist rejects metacharacter abuse before exec.
     // ─────────────────────────────────────────────────────────────────────────
@@ -861,6 +831,7 @@ class PHPAgent {
             'php', 'php.exe', 'node', 'node.exe', 'npm', 'npm.cmd', 'npx', 'npx.cmd',
             'yarn', 'yarn.cmd', 'python', 'python3', 'python.exe', 'py', 'py.exe',
             'pip', 'pip3', 'pytest', 'composer', 'phpunit', 'pest', 'make', 'cargo', 'go',
+            'pm2', 'systemctl', 'supervisorctl',
         ];
         if (is_array($fromApi) && count($fromApi) > 0) {
             $cleaned = [];
@@ -871,6 +842,27 @@ class PHPAgent {
             if ($cleaned) return array_keys($cleaned);
         }
         return $floor;
+    }
+
+    /**
+     * Exact allowlist match, plus versioned interpreters (php8.3, python3.12).
+     * Debian/Ubuntu ship PHP_BINARY as /usr/bin/php8.3; basename must still pass.
+     */
+    private function isPostApplyBinaryAllowed(string $binBase, array $allowedBins) : bool {
+        if (isset($allowedBins[$binBase])) {
+            return true;
+        }
+        if (preg_match('/^(php)(\d+(?:\.\d+)*)(\.exe)?$/', $binBase, $m)) {
+            $plain = $m[1] . ($m[3] ?? '');
+            return isset($allowedBins[$plain]) || isset($allowedBins[$m[1]]);
+        }
+        if (preg_match('/^(python)(\d+(?:\.\d+)*)(\.exe)?$/', $binBase, $m)) {
+            $plain = $m[1] . ($m[3] ?? '');
+            return isset($allowedBins[$plain])
+                || isset($allowedBins[$m[1]])
+                || isset($allowedBins['python3']);
+        }
+        return false;
     }
 
     /**
@@ -918,13 +910,14 @@ class PHPAgent {
             }
 
             try {
+                // String-form: denylist on raw command. Array-form: skip denylist
+                // (`;` inside `php -r '…;…'` is data). Binary allowlist always.
                 if (is_array($rawRun)) {
                     $argv = array_values(array_filter(array_map(
                         function ($p) { return (string)$p; },
                         $rawRun
                     ), function ($p) { return trim($p) !== ''; }));
                 } else {
-                    // shell-token denylist (mirrors python_agent.py).
                     $denylist = ['&&', '||', '|', ';', '`', '$(', '>', '<'];
                     foreach ($denylist as $tok) {
                         if (strpos($cmd, $tok) !== false) {
@@ -964,23 +957,8 @@ class PHPAgent {
                     continue;
                 }
 
-                $joined = implode(' ', $argv);
-                $denylist = ['&&', '||', '|', ';', '`', '$(', '>', '<'];
-                foreach ($denylist as $tok) {
-                    if (strpos($joined, $tok) !== false) {
-                        $stepResults[] = ['name' => $name, 'ok' => false, 'rc' => -4, 'error' => 'unsafe_shell_tokens'];
-                        if (!$ignoreFailure) {
-                            return [
-                                'failed' => true, 'ran' => true, 'dry_run' => false,
-                                'steps' => $stepResults, 'message' => "unsafe_command:{$name}",
-                                'log' => substr(implode("\n", $logs), -8000),
-                            ];
-                        }
-                        continue 2;
-                    }
-                }
                 $binBase = strtolower(basename((string)$argv[0]));
-                if (!isset($allowedBins[$binBase])) {
+                if (!$this->isPostApplyBinaryAllowed($binBase, $allowedBins)) {
                     $stepResults[] = ['name' => $name, 'ok' => false, 'rc' => -6, 'error' => 'binary_not_allowed'];
                     if (!$ignoreFailure) {
                         return [
@@ -1192,8 +1170,8 @@ class PHPAgent {
      * We invoke the resolved binary via the current PHP_BINARY rather than
      * relying on a shebang so the path works on Windows hosts where
      * vendor/bin/phpunit is a `.bat` shim, and so we never accidentally
-     * shell out. This mirrors the python_agent.py pattern of
-     * `[sys.executable, '-m', 'pytest']` and node_agent.js's argv-form
+     * shell out. This mirrors the patcherly_agent.py pattern of
+     * `[sys.executable, '-m', 'pytest']` and patcherly_agent.js's argv-form
      * `execFile('npm', ['test'])` — both rely on a known interpreter and
      * never go through /bin/sh.
      */
@@ -1475,23 +1453,27 @@ class PHPAgent {
             return;
         }
 
-        // Approve the fix before fetching it. The server returns 409 in two cases:
-        //   - low_confidence_confirmation_required: stop the auto-pipeline; the dashboard
-        //     surfaces the low-confidence prompt for manual approval.
-        //   - auto_apply_not_enabled (v1.49): stop the auto-pipeline; the target opted out
-        //     of auto-apply server-side or the entitlement was revoked between ingest and
-        //     approve. The dashboard handles approval manually.
+        $waitStatus = (string) ($analyzeOutcome['status'] ?? '');
+        if (!patcherly_is_fix_approve_status($waitStatus)) {
+            echo "Analysis finished without an approvable draft (status="
+                . ($waitStatus !== '' ? $waitStatus : 'unknown')
+                . "); stopping auto-pipeline.\n";
+            return;
+        }
+
+        // Approve the fix before fetching it. Soft-stop on nested/top-level 409 codes.
         $pathApprove = PatcherlyApiPaths::appPath('errors', (string) $id, 'approve');
-        [$approveBody, $approveCode] = $this->sendSignedWithStatus('POST', $pathApprove, []);
+        [$approveBody, $approveCode] = $this->sendSignedWithStatus('POST', $pathApprove, null, [], true);
         if ($this->handleProtectionModeHttp((int) $approveCode, is_string($approveBody) ? $approveBody : '')) {
             return;
         }
         if ($approveCode === 409) {
             $approveData = $approveBody ? json_decode($approveBody, true) : [];
-            $code = $approveData['code'] ?? '';
+            $detail = patcherly_http_error_detail($approveData);
+            $code = patcherly_http_error_code($approveData);
             if ($code === 'low_confidence_confirmation_required') {
-                $conf = $approveData['confidence'] ?? '?';
-                $thresh = $approveData['threshold'] ?? '?';
+                $conf = $detail['confidence'] ?? '?';
+                $thresh = $detail['threshold'] ?? '?';
                 echo "Fix confidence too low to auto-approve ({$conf}% < {$thresh}%); "
                     . "stopping auto-pipeline — review and approve from the dashboard.\n";
                 return;
@@ -1501,7 +1483,22 @@ class PHPAgent {
                     . "auto-pipeline — review and approve from the dashboard.\n";
                 return;
             }
-            throw new \Exception("approve failed: {$approveCode}");
+            if ($code === 'empty_fix') {
+                echo "No analysis fix available to approve (empty_fix); stopping auto-pipeline.\n";
+                return;
+            }
+            if ($code === 'approve_requires_post_analysis') {
+                echo "Approve requires post-analysis status (approve_requires_post_analysis); "
+                    . "stopping auto-pipeline.\n";
+                return;
+            }
+            if (patcherly_is_approve_409_soft_stop($code)) {
+                echo "approve soft-stop ({$code}); stopping auto-pipeline.\n";
+                return;
+            }
+            $label = $code !== null && $code !== '' ? $code : 'unknown';
+            echo "approve returned 409 ({$label}); stopping auto-pipeline.\n";
+            return;
         }
         if ($approveCode < 200 || $approveCode >= 300) {
             throw new \Exception("approve failed: {$approveCode}");
@@ -1535,7 +1532,7 @@ class PHPAgent {
             $this->postRefusedApplyResult((string) $id, self::SUSPICIOUS_REFUSAL_MSG, 'suspicious patch');
             return;
         }
-        if (isset($data['fix'])) {
+        if (isset($data['fix']) && is_string($data['fix']) && trim($data['fix']) !== '') {
             echo "Received fix: " . substr($data['fix'], 0, 100) . "...\n";
             // v1.43 launch-readiness: target-level dry_run mirrored on the fix payload.
             // When true, preview only -- do not write or restart. Defaults to false (legacy
@@ -1562,6 +1559,9 @@ class PHPAgent {
                 'success' => $success,
                 'fix_path' => $this->logFile,
                 'message' => $applyResult['message'] ?? ($success ? 'Fix passed local tests.' : 'Fix failed or rolled back.'),            ];
+            if (!empty($applyResult['reason'])) {
+                $applyPayload['reason'] = $applyResult['reason'];
+            }
             if ($targetDryRun) {
                 $applyPayload['dry_run'] = true;
             }
@@ -1572,6 +1572,14 @@ class PHPAgent {
             // in Mongo and break dashboard-initiated rollback.
             if (!empty($applyResult['backup_metadata']['backup_dir'])) {
                 $applyPayload['backup_path'] = $applyResult['backup_metadata']['backup_dir'];
+            }
+            if (!empty($applyResult['backup_metadata']['files']) && is_array($applyResult['backup_metadata']['files'])) {
+                $applyPayload['files_affected'] = array_values($applyResult['backup_metadata']['files']);
+            } elseif (is_string($data['fix'] ?? null)) {
+                $extracted = $this->extractFilesFromFix($data['fix']);
+                if (!empty($extracted)) {
+                    $applyPayload['files_affected'] = array_values($extracted);
+                }
             }
 
             if ($postApplyResult !== null) {
@@ -1595,7 +1603,7 @@ class PHPAgent {
             // Optional warm-up before tests when post-apply restart steps actually
             // ran (e.g. systemctl reload php-fpm needs a moment before PHPUnit can
             // reconnect to a pooled DB). Mirrors PATCHERLY_POST_APPLY_TEST_DELAY_SEC
-            // in connectors/python/python_agent.py and connectors/nodejs/node_agent.js.
+            // in connectors/python/patcherly_agent.py and connectors/nodejs/patcherly_agent.js.
             // Skipped on dry-run (no real restart happened) and when post-apply did
             // not run at all. Note: PHP CLI processes errors sequentially in
             // monitorLogs(), so the per-process apply→post-apply→tests workflow lock
@@ -1615,7 +1623,24 @@ class PHPAgent {
 
             $this->runTestsAndReport($id, $success);
         } else {
-            echo "No fix received from server.\n";
+            echo "No fix received from server (empty_fix); reporting apply-result failure.\n";
+            $emptyPayload = [
+                'success' => false,
+                'fix_path' => $this->logFile,
+                'message' => 'empty_fix',
+            ];
+            try {
+                [$emptyBody, $emptyStatus] = $this->sendSignedWithStatus(
+                    'POST',
+                    PatcherlyApiPaths::appPath('errors', (string) $id, 'fix', 'apply-result'),
+                    $emptyPayload
+                );
+                if ($emptyStatus === 409) {
+                    error_log("apply-result empty_fix returned 409 for {$id}");
+                }
+            } catch (\Throwable $e) {
+                error_log('[patcherly] apply-result empty_fix failed: ' . $e->getMessage());
+            }
         }
     }
 
@@ -1623,6 +1648,8 @@ class PHPAgent {
         /**
          * Extract file paths from fix content.
          * Handles unified diff format, JSON with patch field, etc.
+         * Returns an empty array when nothing is found (caller refuses apply —
+         * never defaults to the monitored log file; WP parity).
          */
         $files = [];
         
@@ -1643,13 +1670,13 @@ class PHPAgent {
                 if (strpos($filePath, 'a/') === 0 || strpos($filePath, 'b/') === 0) {
                     $filePath = substr($filePath, 2);
                 }
-                if ($filePath && !in_array($filePath, $files)) {
+                if ($filePath && $filePath !== '/dev/null' && !in_array($filePath, $files)) {
                     $files[] = $filePath;
                 }
             }
         }
         
-        return !empty($files) ? $files : [$this->logFile];
+        return $files;
     }
 
     /**
@@ -1734,6 +1761,14 @@ class PHPAgent {
         foreach ($this->extractFilesFromFix($fix) as $rawPath) {
             $filesToBackup[] = $this->resolvePatchTargetPath((string)$rawPath);
         }
+        if (empty($filesToBackup)) {
+            return [
+                'success' => false,
+                'message' => 'Fix payload does not reference any files to backup and apply.',
+                'reason' => 'no_files_in_fix',
+                'backup_metadata' => null,
+            ];
+        }
         
         // Create backup before applying fix
         $backupMetadata = null;
@@ -1815,9 +1850,16 @@ class PHPAgent {
                 ];
                 
             } catch (PatchParseError $e) {
-                echo "Failed to parse patch, falling back to simple fix: {$e->getMessage()}\n";
-                // Fallback: treat fix as simple text replacement
-                return $this->applySimpleFix($fix, $filesToBackup, $errorId, $dryRun, $backupMetadata);
+                echo "Failed to parse patch (fail closed): {$e->getMessage()}\n";
+                if ($backupMetadata) {
+                    $this->rollbackFromBackup($backupMetadata);
+                }
+                return [
+                    'success' => false,
+                    'message' => "Unsupported patch format: {$e->getMessage()}",
+                    'reason' => 'unsupported_patch_format',
+                    'backup_metadata' => $backupMetadata,
+                ];
             } catch (PatchApplyError $e) {
                 echo "Failed to apply patch: {$e->getMessage()}\n";
                 if ($backupMetadata) {
@@ -1836,49 +1878,6 @@ class PHPAgent {
             }
             return ['success' => false, 'message' => 'Exception during fix application: ' . $e->getMessage(), 'backup_metadata' => $backupMetadata];
         }
-    }
-    
-    private function applySimpleFix($fix, $filesToBackup, $errorId, $dryRun, $backupMetadata) {
-        /**
-         * Apply a simple fix when patch parsing fails.
-         * Fallback for non-patch format fixes.
-         */
-        if ($dryRun) {
-            return [
-                'success' => true,
-                'message' => 'Dry-run: Simple fix would be applied.',
-                'backup_metadata' => $backupMetadata
-            ];
-        }
-        
-        echo "Applying simple fix (non-patch format)\n";
-        
-        // If log_file is in backup list, we can write fix there as a test
-        if (in_array($this->logFile, $filesToBackup)) {
-            try {
-                file_put_contents($this->logFile, $fix);
-                return [
-                    'success' => true,
-                    'message' => 'Simple fix applied (written to log file).',
-                    'backup_metadata' => $backupMetadata
-                ];
-            } catch (Exception $e) {
-                if ($backupMetadata) {
-                    $this->rollbackFromBackup($backupMetadata);
-                }
-                return [
-                    'success' => false,
-                    'message' => "Failed to apply simple fix: {$e->getMessage()}",
-                    'backup_metadata' => $backupMetadata
-                ];
-            }
-        }
-        
-        return [
-            'success' => true,
-            'message' => 'Simple fix processed (no files modified).',
-            'backup_metadata' => $backupMetadata
-        ];
     }
     
     private function rollbackFromBackup($backupMetadata) {
@@ -1972,28 +1971,17 @@ class PHPAgent {
             if ($ts === false || $ts - 30 <= time()) $needsRefresh = true;
         }
         if (!$needsRefresh) return $creds;
-        $refresh = $creds['refresh_token'] ?? '';
-        if (!$refresh) {
-            error_log('[patcherly] OAuth access expired and no refresh_token. Run `patcherly login`.');
-            return null;
-        }
         require_once __DIR__ . '/oauth_client.php';
+        require_once __DIR__ . '/credential_store.php';
+        $store = new PatcherlyCredentialStore($this->oauthCredFile);
         try {
-            $fresh = patcherly_oauth_refresh_token($this->serverUrl, $this->oauthClientId, $refresh);
+            $fresh = patcherly_oauth_ensure_fresh_token($this->serverUrl, $this->oauthClientId, $store);
         } catch (\Throwable $e) {
-            patcherly_oauth_signal_disconnect_best_effort(
-                $this->serverUrl,
-                $this->oauthClientId,
-                $refresh,
-                is_string($creds['access_token'] ?? null) ? $creds['access_token'] : null
-            );
             error_log("[patcherly] OAuth refresh failed: {$e->getMessage()}. Run `patcherly login`.");
             return null;
         }
         if (!is_array($fresh) || empty($fresh['access_token'])) return null;
         $this->oauthCreds = $fresh;
-        @file_put_contents($this->oauthCredFile, json_encode($fresh, JSON_PRETTY_PRINT));
-        @chmod($this->oauthCredFile, 0600);
         return $fresh;
     }
 
@@ -2035,7 +2023,8 @@ class PHPAgent {
         $maxWall = 8 * 60 * 60;
         $started = time();
         $asyncPath = PatcherlyApiPaths::appPath('errors', $errorId, 'analyze-async');
-        [$startBody, $startCode] = $this->sendSignedWithStatus('POST', $asyncPath, []);
+        // Empty body — parity with Python/Node (HMAC covers body; do not send "[]"/"{}").
+        [$startBody, $startCode] = $this->sendSignedWithStatus('POST', $asyncPath, null, [], true);
         if ($this->handleProtectionModeHttp((int) $startCode, is_string($startBody) ? $startBody : '')) {
             return ['terminal' => false, 'status' => 'protection_mode', 'error_id' => $errorId];
         }
@@ -2044,7 +2033,7 @@ class PHPAgent {
         }
 
         $waitPath = PatcherlyApiPaths::appPath('errors', $errorId, 'analysis-wait');
-        $waitSignPath = $waitPath . '?timeout=120';
+        $waitSignPath = $waitPath . '?timeout=30';
         while ((time() - $started) < $maxWall) {
             [$waitBody, $waitCode] = $this->sendSignedWithStatus('GET', $waitSignPath, []);
             if ($this->handleProtectionModeHttp((int) $waitCode, is_string($waitBody) ? $waitBody : '')) {
@@ -2081,9 +2070,18 @@ class PHPAgent {
      *
      * @return array{string|false, int}  [$body, $statusCode]
      */
-    private function sendSignedWithStatus(string $method, string $path, $data = null, array $headers = []): array {
+    /**
+     * @param bool $emptyBody When true, POST with an empty body (sign '' and send '').
+     *                        Use for analyze-async / approve — not for JSON payloads.
+     * @return array{string|false, int}  [$body, $statusCode]
+     */
+    private function sendSignedWithStatus(string $method, string $path, $data = null, array $headers = [], bool $emptyBody = false): array {
         $url = (strpos($path, 'http') === 0) ? $path : $this->buildApiEndpoint($path);
-        $bodyStr = ($method === 'GET') ? '' : json_encode($data ?: []);
+        if ($method === 'GET' || $emptyBody) {
+            $bodyStr = '';
+        } else {
+            $bodyStr = json_encode($data ?? []);
+        }
         $headers = $this->buildAuthHeaders($method, $path, $bodyStr, $headers);
         $ch = curl_init($url);
         $h = ['Content-Type: application/json'];
@@ -2095,7 +2093,7 @@ class PHPAgent {
         curl_setopt($ch, CURLOPT_HEADER, true);
         if ($method !== 'GET') {
             curl_setopt($ch, CURLOPT_POST, true);
-            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data ?: []));
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $bodyStr);
         }
         $raw = curl_exec($ch);
         $statusCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -2193,6 +2191,30 @@ class PHPAgent {
                         // Non-critical
                     }
                 }
+                $reconnect = (isset($j['reconnect']) && is_array($j['reconnect'])) ? $j['reconnect'] : [];
+                $phase = isset($reconnect['phase']) && is_string($reconnect['phase']) ? $reconnect['phase'] : '';
+                // Soft/server reconnect: poll ~60s (default 300s) for faster nudge pickup.
+                $this->excludePathsCacheTtl = ($phase === 'soft_hold' || $phase === 'server_retrying') ? 60 : 300;
+                $nudgeAt = isset($reconnect['nudge_requested_at']) && is_string($reconnect['nudge_requested_at'])
+                    ? $reconnect['nudge_requested_at']
+                    : '';
+                if ($nudgeAt !== '' && $nudgeAt !== $this->lastReconnectNudgeAt) {
+                    $this->lastReconnectNudgeAt = $nudgeAt;
+                    try {
+                        require_once __DIR__ . '/oauth_client.php';
+                        require_once __DIR__ . '/credential_store.php';
+                        $store = new PatcherlyCredentialStore($this->oauthCredFile);
+                        $fresh = patcherly_oauth_ensure_fresh_token($this->serverUrl, $this->oauthClientId, $store);
+                        patcherly_oauth_signal_reconnect_recovered_best_effort(
+                            $this->serverUrl,
+                            is_string($fresh['access_token'] ?? null) ? $fresh['access_token'] : null,
+                            is_string($fresh['hmac_secret'] ?? null) ? $fresh['hmac_secret'] : null,
+                            is_string($fresh['hmac_secret_id'] ?? null) ? $fresh['hmac_secret_id'] : null
+                        );
+                    } catch (\Throwable $e) {
+                        // Non-critical
+                    }
+                }
             }
         } catch (\Throwable $e) {
             // Non-critical
@@ -2248,35 +2270,14 @@ class PHPAgent {
     }
     
     private function extractFilePath($errorContext) : ?string {
-        // Extract file path from error context/traceback. Mirrors the server-side
-        // extract_source_file_path() so path exclusion (incl. exclude_paths) applies
-        // uniformly across languages, not just Python.
-        if (empty($errorContext)) return null;
-
-        // Python-style traceback: File "/path/to/file.py", line 123
-        if (preg_match('/File\s+["\']([^"\']+)["\']/', $errorContext, $matches)) {
-            return $matches[1];
+        // Prefer deepest useful frame — shared with file_context_reader.php.
+        if (empty($errorContext)) {
+            return null;
         }
-        // PHP fatal / warning: ... in /abs/path/file.php:233  |  ... in /abs/path/file.php on line 233
-        if (preg_match('/\bin\s+((?:\/|[A-Za-z]:[\\\\\/])[^\s:]+?\.\w+)(?::\d+|\s+on line\s+\d+)/i', $errorContext, $matches)) {
-            return $matches[1];
+        if (!function_exists('patcherly_shared_extract_file_path_from_log')) {
+            require_once __DIR__ . '/lib/file_context_reader.php';
         }
-        // PHP / Python numbered stack frame: #0 /abs/path/file.php(6454):
-        if (preg_match('/#\d+\s+((?:\/|[A-Za-z]:[\\\\\/])[^\s(]+?\.\w+)\(\d+\)/', $errorContext, $matches)) {
-            return $matches[1];
-        }
-        // Node stack frame: at fn (/abs/path/file.js:12:34)  |  optional file://
-        if (preg_match('/\(((?:file:\/\/)?(?:\/|[A-Za-z]:[\\\\\/])[^\s()]+?\.\w+):\d+(?::\d+)?\)/', $errorContext, $matches)) {
-            return $matches[1];
-        }
-        if (preg_match('/\bat\s+(?:file:\/\/)?((?:\/|[A-Za-z]:[\\\\\/])[^\s()]+?\.\w+):\d+(?::\d+)?/', $errorContext, $matches)) {
-            return $matches[1];
-        }
-        if (preg_match('/@((?:\/|[A-Za-z]:[\\\\\/])[^\s:@]+?\.\w+):\d+(?::\d+)?/', $errorContext, $matches)) {
-            return $matches[1];
-        }
-
-        return null;
+        return patcherly_shared_extract_file_path_from_log((string) $errorContext);
     }
 
     private function sendGet($url, $headers = [], &$responseHeaders = null, &$statusCode = null) {
@@ -2427,7 +2428,24 @@ class PHPAgent {
                 $this->postRefusedApplyResult($errorId, self::SUSPICIOUS_REFUSAL_MSG, 'suspicious patch');
                 return;
             }
-            if (!is_array($data) || !isset($data['fix'])) {
+            if (!is_array($data) || !isset($data['fix']) || !is_string($data['fix']) || trim($data['fix']) === '') {
+                $emptyPayload = [
+                    'success' => false,
+                    'fix_path' => $this->logFile,
+                    'message' => 'empty_fix',
+                ];
+                try {
+                    [$applyRespBody, $applyStatus] = $this->sendSignedWithStatus(
+                        'POST',
+                        PatcherlyApiPaths::appPath('errors', $errorId, 'fix', 'apply-result'),
+                        $emptyPayload
+                    );
+                    if ($applyStatus === 409) {
+                        error_log("apply-result empty_fix returned 409 for {$errorId}");
+                    }
+                } catch (\Throwable $e) {
+                    error_log('[patcherly] apply-result empty_fix failed: ' . $e->getMessage());
+                }
                 return;
             }
             $targetDryRun = isset($data['dry_run']) ? (bool) $data['dry_run'] : false;
@@ -2447,11 +2465,22 @@ class PHPAgent {
                 'fix_path' => $this->logFile,
                 'message' => $applyResult['message'] ?? ($success ? 'Fix passed local tests.' : 'Fix failed or rolled back.'),
             ];
+            if (!empty($applyResult['reason'])) {
+                $applyPayload['reason'] = $applyResult['reason'];
+            }
             if ($targetDryRun) {
                 $applyPayload['dry_run'] = true;
             }
             if (!empty($applyResult['backup_metadata']['backup_dir'])) {
                 $applyPayload['backup_path'] = $applyResult['backup_metadata']['backup_dir'];
+            }
+            if (!empty($applyResult['backup_metadata']['files']) && is_array($applyResult['backup_metadata']['files'])) {
+                $applyPayload['files_affected'] = array_values($applyResult['backup_metadata']['files']);
+            } elseif (is_string($data['fix'] ?? null)) {
+                $extracted = $this->extractFilesFromFix($data['fix']);
+                if (!empty($extracted)) {
+                    $applyPayload['files_affected'] = array_values($extracted);
+                }
             }
             if ($postApplyResult !== null) {
                 $applyPayload['post_apply'] = $postApplyResult;
@@ -2616,7 +2645,7 @@ class PHPAgent {
  * server. Designed to be the entry point of PHP's built-in web server (SAPI
  * `cli-server`):
  *
- *   php -S 127.0.0.1:8083 connectors/php/php_agent.php
+ *   php -S 127.0.0.1:8083 connectors/php/patcherly_agent.php
  *
  * Under `cli-server` PHP dispatches every incoming request through this
  * script, populates `$_SERVER['REQUEST_URI']` / `$_SERVER['REQUEST_METHOD']`,
@@ -2830,13 +2859,13 @@ function patcherly_php_local_router() {
 /**
  * Entry-point dispatch.
  *
- *   - `cli-server` SAPI (i.e. invoked as `php -S 127.0.0.1:8083 php_agent.php`)
+ *   - `cli-server` SAPI (i.e. invoked as `php -S 127.0.0.1:8083 patcherly_agent.php`)
  *     -> serve one HTTP request via patcherly_php_local_router(), then return
  *     so `php -S` can move on to the next connection. The router covers
  *     /api/file-content (Bearer token + project-root scope) and
  *     /local-approvals/{id}/(approve|reject-patch) (Bearer token + id regex).
  *
- *   - `cli` SAPI (i.e. plain `php php_agent.php`) -> run the long-lived
+ *   - `cli` SAPI (i.e. plain `php patcherly_agent.php`) -> run the long-lived
  *     poll loop: discover API URL, tail the application log file, send
  *     detected errors to Patcherly, and pick up dashboard-initiated rollbacks.
  *     The loop polls every 5s (`monitorLogs()` internal `sleep(5)`); see

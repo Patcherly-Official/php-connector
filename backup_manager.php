@@ -76,6 +76,19 @@ class AgentBackupManager {
         }
         return false;
     }
+
+    /**
+     * Unique backup leaf name: path relative to filesystem root/anchor with
+     * separators replaced by `_` (Python backup_manager parity). Avoids
+     * same-basename collisions across directories.
+     */
+    private function uniqueBackupFileName($filePath) {
+        $normalized = str_replace('\\', '/', (string) $filePath);
+        $normalized = preg_replace('#^[A-Za-z]:#', '', $normalized);
+        $normalized = ltrim($normalized, '/');
+        $name = str_replace('/', '_', $normalized);
+        return $name !== '' ? $name : basename((string) $filePath);
+    }
     
     /**
      * Ensure backup directory is protected from direct access.
@@ -147,17 +160,16 @@ class AgentBackupManager {
         $backupManifest = [];
         
         foreach ($files as $filePath) {
+            if (!$this->isPathWithinAllowedRoots($filePath)) {
+                throw new Exception("Refusing backup outside allowed target roots: {$filePath}");
+            }
+            // Missing files the patch will create — skip-OK
+            if (!file_exists($filePath)) {
+                error_log("File not found, skipping: {$filePath}");
+                continue;
+            }
+
             try {
-                if (!$this->isPathWithinAllowedRoots($filePath)) {
-                    error_log("Skipping backup outside allowed target roots: {$filePath}");
-                    continue;
-                }
-                // Check if file exists
-                if (!file_exists($filePath)) {
-                    error_log("File not found, skipping: {$filePath}");
-                    continue;
-                }
-                
                 // Read file content
                 $content = file_get_contents($filePath);
                 if ($content === false) {
@@ -168,12 +180,14 @@ class AgentBackupManager {
                 $checksum = hash('sha256', $content);
                 $fileSize = strlen($content);
                 
-                // Determine backup filename
-                $backupFileName = basename($filePath);
+                // Unique name from path-with-separators→_ (not bare basename)
+                $backupFileName = $this->uniqueBackupFileName($filePath);
                 $backupFile = $backupDir . DIRECTORY_SEPARATOR . $backupFileName;
                 
                 // Write backup file
-                file_put_contents($backupFile, $content);
+                if (file_put_contents($backupFile, $content) === false) {
+                    throw new Exception("Failed to write backup file: {$backupFile}");
+                }
                 
                 $finalBackupFile = $backupFile;
                 $finalSize = $fileSize;
@@ -183,7 +197,9 @@ class AgentBackupManager {
                 if ($compress && $fileSize > 0) {
                     $compressedFile = $backupFile . '.gz';
                     $compressed = gzencode($content, 9);
-                    file_put_contents($compressedFile, $compressed);
+                    if ($compressed === false || file_put_contents($compressedFile, $compressed) === false) {
+                        throw new Exception("Failed to compress backup file: {$backupFile}");
+                    }
                     // Remove uncompressed file
                     unlink($backupFile);
                     $finalBackupFile = $compressedFile;
@@ -203,8 +219,8 @@ class AgentBackupManager {
                 
             } catch (Exception $e) {
                 error_log("Failed to backup file {$filePath}: " . $e->getMessage());
-                // Continue with other files
-                continue;
+                // Existing listed file failed snapshot — abort (no partial manifest)
+                throw new Exception("Failed to backup existing file {$filePath}: " . $e->getMessage(), 0, $e);
             }
         }
         

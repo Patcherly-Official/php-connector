@@ -309,7 +309,8 @@ function patcherly_cli_logout(array $opts): void
             patcherly_oauth_revoke_token(
                 $opts['api-base'],
                 $opts['client-id'],
-                (string) ($creds['refresh_token'] ?? $creds['access_token'])
+                (string) ($creds['refresh_token'] ?? $creds['access_token']),
+                'logout'
             );
         } catch (Throwable $e) {
             fwrite(STDERR, 'Warning: revoke failed: ' . $e->getMessage() . "\n");

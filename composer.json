@@ -19,7 +19,7 @@
     ],
     "autoload": {
         "classmap": [
-            "php_agent.php",
+            "patcherly_agent.php",
             "oauth_client.php",
             "credential_store.php",
             "sanitizer.php",

@@ -18,6 +18,7 @@ final class PatcherlyApiPaths
     public const NAMED_OAUTH_TOKEN_STATUS = "/v1/oauth/token/status";
     public const NAMED_PUBLIC_CONFIG = "/v1/public/config";
     public const NAMED_TARGETS_CONNECTOR_DISCONNECT = "/v1/targets/connector-disconnect";
+    public const NAMED_TARGETS_CONNECTOR_RECONNECT_SIGNAL = "/v1/targets/connector-reconnect-signal";
     public const NAMED_TARGETS_CONNECTOR_STATUS = "/v1/targets/connector-status";
     public const CONNECTOR_CONTRACT_FILE_CONTENT = "/api/file-content";
     public const CONNECTOR_CONTRACT_RESCUE_POLL = "/api/rescue/poll";

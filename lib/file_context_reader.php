@@ -59,47 +59,98 @@ if (!function_exists('patcherly_shared_file_context_path_allowed')) {
     }
 }
 
+if (!function_exists('patcherly_shared_extract_source_location')) {
+    /**
+     * Deepest useful (path, line) from a log/traceback fragment.
+     * Prefer last Python File/line; PHP #0; first Node at.
+     *
+     * @return array{0:?string,1:?int}
+     */
+    function patcherly_shared_extract_source_location(string $errorContext): array {
+        if ($errorContext === '') {
+            return [null, null];
+        }
+        if (preg_match_all(
+            '/File\s+["\']([^"\']+)["\']\s*,\s*line\s+(\d+)/i',
+            $errorContext,
+            $matches,
+            PREG_SET_ORDER
+        ) && $matches) {
+            $last = $matches[count($matches) - 1];
+            return [$last[1], (int) $last[2]];
+        }
+        // PHP fatals put the throw site in "in /path:line" before #0..#N caller frames.
+        // Prefer that site over #0 (often the router), or AI gets the wrong file snapshot.
+        if (preg_match_all(
+            '/\bin\s+((?:\/|[A-Za-z]:[\\\\\/])[^\s:]+?\.\w+)(?::(\d+)|\s+on line\s+(\d+))/i',
+            $errorContext,
+            $matches,
+            PREG_SET_ORDER
+        ) && $matches) {
+            $first = $matches[0];
+            $line = $first[2] !== '' ? $first[2] : ($first[3] ?? '');
+            return [$first[1], $line !== '' ? (int) $line : null];
+        }
+        if (preg_match_all(
+            '/#(\d+)\s+((?:\/|[A-Za-z]:[\\\\\/])[^\s(]+?\.\w+)\((\d+)\)/',
+            $errorContext,
+            $matches,
+            PREG_SET_ORDER
+        ) && $matches) {
+            $best = null;
+            foreach ($matches as $m) {
+                $idx = (int) $m[1];
+                if ($best === null || $idx < $best[0]) {
+                    $best = [$idx, $m[2], (int) $m[3]];
+                }
+            }
+            if ($best !== null) {
+                return [$best[1], $best[2]];
+            }
+        }
+        if (preg_match('/\(((?:file:\/\/)?(?:\/|[A-Za-z]:[\\\\\/])[^\s()]+?\.\w+):(\d+)(?::\d+)?\)/', $errorContext, $m)) {
+            return [$m[1], (int) $m[2]];
+        }
+        if (preg_match('/\bat\s+(?:file:\/\/)?((?:\/|[A-Za-z]:[\\\\\/])[^\s()]+?\.\w+):(\d+)(?::\d+)?/', $errorContext, $m)) {
+            return [$m[1], (int) $m[2]];
+        }
+        if (preg_match('/@((?:\/|[A-Za-z]:[\\\\\/])[^\s:@]+?\.\w+):(\d+)(?::\d+)?/', $errorContext, $m)) {
+            return [$m[1], (int) $m[2]];
+        }
+        if (preg_match_all('/File\s+["\']([^"\']+)["\']/', $errorContext, $matches) && !empty($matches[1])) {
+            return [$matches[1][count($matches[1]) - 1], null];
+        }
+        return [null, null];
+    }
+}
+
 if (!function_exists('patcherly_shared_extract_line_number')) {
     function patcherly_shared_extract_line_number(string $errorContext): ?int {
+        [, $line] = patcherly_shared_extract_source_location($errorContext);
+        if ($line !== null) {
+            return $line;
+        }
         $patterns = [
             '/on line\s+(\d+)/i',
             '/:(\d+)(?::\d+)?\s/',
             '/\((\d+)\)\s*$/',
             '/, line (\d+)/i',
         ];
+        $last = null;
         foreach ($patterns as $pattern) {
-            if (preg_match($pattern, $errorContext, $matches) && isset($matches[1])) {
-                return (int) $matches[1];
+            if (preg_match_all($pattern, $errorContext, $matches) && !empty($matches[1])) {
+                $last = (int) $matches[1][count($matches[1]) - 1];
+                break;
             }
         }
-        return null;
+        return $last;
     }
 }
 
 if (!function_exists('patcherly_shared_extract_file_path_from_log')) {
     function patcherly_shared_extract_file_path_from_log(string $errorContext): ?string {
-        if ($errorContext === '') {
-            return null;
-        }
-        if (preg_match('/File\s+["\']([^"\']+)["\']/', $errorContext, $matches)) {
-            return $matches[1];
-        }
-        if (preg_match('/\bin\s+((?:\/|[A-Za-z]:[\\\\\/])[^\s:]+?\.\w+)(?::\d+|\s+on line\s+\d+)/i', $errorContext, $matches)) {
-            return $matches[1];
-        }
-        if (preg_match('/#\d+\s+((?:\/|[A-Za-z]:[\\\\\/])[^\s(]+?\.\w+)\(\d+\)/', $errorContext, $matches)) {
-            return $matches[1];
-        }
-        if (preg_match('/\(((?:file:\/\/)?(?:\/|[A-Za-z]:[\\\\\/])[^\s()]+?\.\w+):\d+(?::\d+)?\)/', $errorContext, $matches)) {
-            return $matches[1];
-        }
-        if (preg_match('/\bat\s+(?:file:\/\/)?((?:\/|[A-Za-z]:[\\\\\/])[^\s()]+?\.\w+):\d+(?::\d+)?/', $errorContext, $matches)) {
-            return $matches[1];
-        }
-        if (preg_match('/@((?:\/|[A-Za-z]:[\\\\\/])[^\s:@]+?\.\w+):\d+(?::\d+)?/', $errorContext, $matches)) {
-            return $matches[1];
-        }
-        return null;
+        [$path] = patcherly_shared_extract_source_location($errorContext);
+        return $path;
     }
 }
 
