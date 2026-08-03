@@ -12,6 +12,7 @@ const PATCHERLY_FIX_APPROVE_STATUSES = ['awaiting_approval', 'manual_review_requ
 /** @var list<string> */
 const PATCHERLY_APPROVE_409_SOFT_STOP_CODES = [
     'empty_fix',
+    'error_path_blocked',
     'low_confidence_confirmation_required',
     'auto_apply_not_enabled',
     'approve_requires_post_analysis',

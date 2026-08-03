@@ -1487,6 +1487,10 @@ class PHPAgent {
                 echo "No analysis fix available to approve (empty_fix); stopping auto-pipeline.\n";
                 return;
             }
+            if ($code === 'error_path_blocked') {
+                echo "Approve blocked by path rules (error_path_blocked); stopping auto-pipeline.\n";
+                return;
+            }
             if ($code === 'approve_requires_post_analysis') {
                 echo "Approve requires post-analysis status (approve_requires_post_analysis); "
                     . "stopping auto-pipeline.\n";
