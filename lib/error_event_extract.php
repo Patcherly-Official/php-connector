@@ -132,7 +132,7 @@ function patcherly_looks_incomplete_error_block(array $lines): bool {
 function patcherly_extract_error_events(array $lines, bool $holdIncomplete = true): array {
     $events = [];
     $current = [];
-    $startOrCont = '/^(Traceback\s|File\s+["\']|Exception:|Error:\s|PHP\s+(?:Fatal|Parse|Warning|Notice|Deprecated)|^\s+at\s+|\s*#\d+\s+)/i';
+    $startOrCont = '/^(Traceback\s|File\s+["\']|Exception:|Error:\s|PHP\s+(?:Fatal|Parse|Warning|Notice|Deprecated)|Stack\s+trace\s*:|^\s+at\s+|\s*#\d+\s+)/i';
     $errorWord = '/\b(error|exception|traceback|fatal)\b/i';
     $pythonExceptionLine = '/^\w+(?:Error|Exception):/i';
 
@@ -149,11 +149,16 @@ function patcherly_extract_error_events(array $lines, bool $holdIncomplete = tru
             $line .= "\n";
         }
         $stripped = trim($line);
+        // PHP fatals emit "Stack trace:" then #N frames then "thrown in path:line".
+        // Those must stay on the same event as the PHP Fatal header — otherwise
+        // log-monitor ingest creates header-only + stack-only duplicates.
         $isContinuation = count($current) > 0 && (
             str_starts_with($line, ' ')
             || str_starts_with($line, "\t")
             || preg_match('/^\s+at\s+/', $line) === 1
             || ($stripped !== '' && $stripped[0] === '#')
+            || preg_match('/^\s*Stack\s+trace\s*:/i', $stripped) === 1
+            || preg_match('/^\s*thrown\s+in\s+/i', $stripped) === 1
             || preg_match($pythonExceptionLine, $stripped) === 1
             || preg_match('/^[\s^~]+$/', rtrim($line, "\r\n")) === 1
             || ($stripped !== '' && preg_match('/^[\^~]+$/', $stripped) === 1)
