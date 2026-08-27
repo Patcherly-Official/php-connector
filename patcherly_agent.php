@@ -1362,6 +1362,7 @@ class PHPAgent {
             'error_type' => $severityFields['error_type'],
             'severity' => $severityFields['severity'],
             'source' => 'log_monitor',
+            'capture_source' => 'log_monitor',
         ];
         if ($this->tenantId && $this->targetId) {
             $payload['tenant_id'] = (string)$this->tenantId;
