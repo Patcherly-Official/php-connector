@@ -303,6 +303,18 @@ class PHPAgent {
         return rtrim($this->serverUrl, '/') . $normalized;
     }
 
+    /**
+     * Registry connector-status path with plugin_version query (HMAC + URL parity).
+     */
+    private function connectorStatusPathWithVersion(): string {
+        $path = PatcherlyApiPaths::NAMED_TARGETS_CONNECTOR_STATUS;
+        if (!defined('PATCHERLY_CONNECTOR_VERSION') || PATCHERLY_CONNECTOR_VERSION === '') {
+            return $path;
+        }
+        $sep = (strpos($path, '?') === false) ? '?' : '&';
+        return $path . $sep . 'plugin_version=' . rawurlencode((string) PATCHERLY_CONNECTOR_VERSION);
+    }
+
     private function discoverApiUrl() : void {
         /**Discover API URL from public config endpoint (skipped when SERVER_URL / PATCHERLY_API_BASE is set).*/
         if (!$this->serverUrl) {
@@ -507,6 +519,7 @@ class PHPAgent {
         }
 
         $lastSize = file_exists($this->logFile) ? filesize($this->logFile) : 0;
+        $lastMtime = file_exists($this->logFile) ? (float) filemtime($this->logFile) : 0.0;
         echo "Starting log monitoring on {$this->logFile}...\n";
         $this->collectAndUploadContext(true);
         $refreshCounter = 0;
@@ -516,7 +529,16 @@ class PHPAgent {
             if (!$this->isProtectionModeStandby()) {
                 clearstatcache();
                 $currentSize = file_exists($this->logFile) ? filesize($this->logFile) : 0;
+                $currentMtime = file_exists($this->logFile) ? (float) filemtime($this->logFile) : 0.0;
                 if ($currentSize < $lastSize) {
+                    $lastSize = 0;
+                    $this->logEventCarryState = ['pending' => [], 'since' => null];
+                } elseif (
+                    $currentSize === $lastSize
+                    && isset($lastMtime)
+                    && $currentMtime > ((float) $lastMtime) + 1e-6
+                ) {
+                    // Truncate-then-rewrite to the same byte length.
                     $lastSize = 0;
                     $this->logEventCarryState = ['pending' => [], 'since' => null];
                 }
@@ -535,11 +557,14 @@ class PHPAgent {
                     }
                     fclose($handle);
                     $lastSize = $currentSize;
+                    $lastMtime = $currentMtime;
                     foreach ($newLines as $line) {
                         foreach ($this->splitLogOccurrences(rtrim((string) $line, "\r\n")) as $occurrence) {
                             $expanded[] = $occurrence . "\n";
                         }
                     }
+                } else {
+                    $lastMtime = $currentMtime;
                 }
                 [$events, $this->logEventCarryState] = patcherly_ingest_log_lines_with_carry(
                     $this->logEventCarryState,
@@ -1455,60 +1480,65 @@ class PHPAgent {
         }
 
         $waitStatus = (string) ($analyzeOutcome['status'] ?? '');
-        if (!patcherly_is_fix_approve_status($waitStatus)) {
+        $alreadyApproved = patcherly_is_already_approved_apply_status($waitStatus);
+        if (!$alreadyApproved && !patcherly_is_fix_approve_status($waitStatus)) {
             echo "Analysis finished without an approvable draft (status="
                 . ($waitStatus !== '' ? $waitStatus : 'unknown')
                 . "); stopping auto-pipeline.\n";
             return;
         }
 
-        // Approve the fix before fetching it. Soft-stop on nested/top-level 409 codes.
-        $pathApprove = PatcherlyApiPaths::appPath('errors', (string) $id, 'approve');
-        [$approveBody, $approveCode] = $this->sendSignedWithStatus('POST', $pathApprove, null, [], true);
-        if ($this->handleProtectionModeHttp((int) $approveCode, is_string($approveBody) ? $approveBody : '')) {
-            return;
+        if ($alreadyApproved) {
+            echo "Error already approved (status={$waitStatus}); fetching fix payload...\n";
+        } else {
+            // Approve the fix before fetching it. Soft-stop on nested/top-level 409 codes.
+            $pathApprove = PatcherlyApiPaths::appPath('errors', (string) $id, 'approve');
+            [$approveBody, $approveCode] = $this->sendSignedWithStatus('POST', $pathApprove, null, [], true);
+            if ($this->handleProtectionModeHttp((int) $approveCode, is_string($approveBody) ? $approveBody : '')) {
+                return;
+            }
+            if ($approveCode === 409) {
+                $approveData = $approveBody ? json_decode($approveBody, true) : [];
+                $detail = patcherly_http_error_detail($approveData);
+                $code = patcherly_http_error_code($approveData);
+                if ($code === 'low_confidence_confirmation_required') {
+                    $conf = $detail['confidence'] ?? '?';
+                    $thresh = $detail['threshold'] ?? '?';
+                    echo "Fix confidence too low to auto-approve ({$conf}% < {$thresh}%); "
+                        . "stopping auto-pipeline — review and approve from the dashboard.\n";
+                    return;
+                }
+                if ($code === 'auto_apply_not_enabled') {
+                    echo "Auto-apply not enabled for this target (server-side gate); stopping "
+                        . "auto-pipeline — review and approve from the dashboard.\n";
+                    return;
+                }
+                if ($code === 'empty_fix') {
+                    echo "No analysis fix available to approve (empty_fix); stopping auto-pipeline.\n";
+                    return;
+                }
+                if ($code === 'error_path_blocked') {
+                    echo "Approve blocked by path rules (error_path_blocked); stopping auto-pipeline.\n";
+                    return;
+                }
+                if ($code === 'approve_requires_post_analysis') {
+                    echo "Approve requires post-analysis status (approve_requires_post_analysis); "
+                        . "stopping auto-pipeline.\n";
+                    return;
+                }
+                if (patcherly_is_approve_409_soft_stop($code)) {
+                    echo "approve soft-stop ({$code}); stopping auto-pipeline.\n";
+                    return;
+                }
+                $label = $code !== null && $code !== '' ? $code : 'unknown';
+                echo "approve returned 409 ({$label}); stopping auto-pipeline.\n";
+                return;
+            }
+            if ($approveCode < 200 || $approveCode >= 300) {
+                throw new \Exception("approve failed: {$approveCode}");
+            }
+            echo "Fix approved; fetching fix payload...\n";
         }
-        if ($approveCode === 409) {
-            $approveData = $approveBody ? json_decode($approveBody, true) : [];
-            $detail = patcherly_http_error_detail($approveData);
-            $code = patcherly_http_error_code($approveData);
-            if ($code === 'low_confidence_confirmation_required') {
-                $conf = $detail['confidence'] ?? '?';
-                $thresh = $detail['threshold'] ?? '?';
-                echo "Fix confidence too low to auto-approve ({$conf}% < {$thresh}%); "
-                    . "stopping auto-pipeline — review and approve from the dashboard.\n";
-                return;
-            }
-            if ($code === 'auto_apply_not_enabled') {
-                echo "Auto-apply not enabled for this target (server-side gate); stopping "
-                    . "auto-pipeline — review and approve from the dashboard.\n";
-                return;
-            }
-            if ($code === 'empty_fix') {
-                echo "No analysis fix available to approve (empty_fix); stopping auto-pipeline.\n";
-                return;
-            }
-            if ($code === 'error_path_blocked') {
-                echo "Approve blocked by path rules (error_path_blocked); stopping auto-pipeline.\n";
-                return;
-            }
-            if ($code === 'approve_requires_post_analysis') {
-                echo "Approve requires post-analysis status (approve_requires_post_analysis); "
-                    . "stopping auto-pipeline.\n";
-                return;
-            }
-            if (patcherly_is_approve_409_soft_stop($code)) {
-                echo "approve soft-stop ({$code}); stopping auto-pipeline.\n";
-                return;
-            }
-            $label = $code !== null && $code !== '' ? $code : 'unknown';
-            echo "approve returned 409 ({$label}); stopping auto-pipeline.\n";
-            return;
-        }
-        if ($approveCode < 200 || $approveCode >= 300) {
-            throw new \Exception("approve failed: {$approveCode}");
-        }
-        echo "Fix approved; fetching fix payload...\n";
 
         // Get fix with response headers for HMAC verification
         $path3 = PatcherlyApiPaths::appPath('errors', (string) $id, 'fix');
@@ -2130,7 +2160,7 @@ class PHPAgent {
             echo "OAuth credentials not found. Run `patcherly login` to authenticate.\n";
             return;
         }
-        [$resp, $httpCode] = $this->sendSignedWithStatus('GET', PatcherlyApiPaths::NAMED_TARGETS_CONNECTOR_STATUS);
+        [$resp, $httpCode] = $this->sendSignedWithStatus('GET', $this->connectorStatusPathWithVersion());
         if ($resp === false || $httpCode !== 200) {
             if ($httpCode === 401) {
                 echo "OAuth authentication failed. Run `patcherly login` to re-authenticate.\n";
@@ -2175,7 +2205,7 @@ class PHPAgent {
         if (!$this->ensureFreshOAuth()) return;
         
         try {
-            [$response, $httpCode] = $this->sendSignedWithStatus('GET', PatcherlyApiPaths::NAMED_TARGETS_CONNECTOR_STATUS);
+            [$response, $httpCode] = $this->sendSignedWithStatus('GET', $this->connectorStatusPathWithVersion());
             
             if ($response !== false && $httpCode === 200) {
                 $j = json_decode($response, true);

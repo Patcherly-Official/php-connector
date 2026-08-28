@@ -52,6 +52,31 @@ function patcherly_orphan_file_stack_closed(array $lines): bool {
 }
 
 /**
+ * PHP stacks are closed by "#N {main}" and/or a "thrown in path:line" trailer.
+ * Bare "#N" frames without those markers are incomplete (more frames may follow).
+ *
+ * @param string[] $lines
+ */
+function patcherly_php_stack_closed(array $lines): bool {
+    foreach ($lines as $line) {
+        $stripped = trim((string) $line);
+        if ($stripped === '') {
+            continue;
+        }
+        if (preg_match('/^\s*thrown\s+in\s+/i', $stripped) === 1) {
+            return true;
+        }
+        if (
+            preg_match('/^\s*#\d+\s+/', $stripped) === 1
+            && preg_match('/\{main\}/', $stripped) === 1
+        ) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
  * @param string[] $lines
  */
 function patcherly_looks_incomplete_error_block(array $lines): bool {
@@ -77,7 +102,10 @@ function patcherly_looks_incomplete_error_block(array $lines): bool {
         if (preg_match('/^\s*Traceback\b/i', $ln) === 1) {
             $hasTraceback = true;
         }
-        if (preg_match('/^\s*Stack trace\s*:/i', $ln) === 1) {
+        if (
+            preg_match('/^\s*Stack trace\s*:/i', $ln) === 1
+            || preg_match('/^\s*#\d+\s+/', $ln) === 1
+        ) {
             $hasPhpStack = true;
         }
     }
@@ -96,21 +124,16 @@ function patcherly_looks_incomplete_error_block(array $lines): bool {
     if ($hasFile && !$hasTraceback) {
         return !patcherly_orphan_file_stack_closed($lines);
     }
+    // WP debug.log often emits ERROR + bare #N frames (no "Stack trace:" label).
+    if ($hasPhpStack) {
+        return !patcherly_php_stack_closed($lines);
+    }
 
     $last = trim($nonempty[count($nonempty) - 1]);
     if (
         preg_match('/\bERROR\b.*\b\w+(?:Error|Exception)\s*:/i', $last) === 1
         && !$hasTraceback
         && !$hasFile
-    ) {
-        return true;
-    }
-    if (
-        $hasPhpStack
-        && (
-            preg_match('/^\s*Stack trace\s*:/i', $last) === 1
-            || preg_match('/^\s*#\d+\s+/', $last) === 1
-        )
     ) {
         return true;
     }
@@ -132,8 +155,11 @@ function patcherly_looks_incomplete_error_block(array $lines): bool {
 function patcherly_extract_error_events(array $lines, bool $holdIncomplete = true): array {
     $events = [];
     $current = [];
-    $startOrCont = '/^(Traceback\s|File\s+["\']|Exception:|Error:\s|PHP\s+(?:Fatal|Parse|Warning|Notice|Deprecated)|Stack\s+trace\s*:|^\s+at\s+|\s*#\d+\s+)/i';
-    $errorWord = '/\b(error|exception|traceback|fatal)\b/i';
+    // Stack frames / "Stack trace:" / Node "at" are continuation-only — never
+    // start a new event alone (that created orphan stack-only incidents next to
+    // "work/N failed:" companion lines that lack \berror\b).
+    $startOrCont = '/^(Traceback\s|File\s+["\']|Exception:|Error:\s|PHP\s+(?:Fatal|Parse|Warning|Notice|Deprecated))/i';
+    $errorWord = '/\b(error|exception|traceback|fatal|failed|failure)\b/i';
     $pythonExceptionLine = '/^\w+(?:Error|Exception):/i';
 
     $flush = static function () use (&$current, &$events): void {

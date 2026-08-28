@@ -11,7 +11,7 @@ declare(strict_types=1);
  *   logout       Revoke the current token and delete the local credential file.
  *   status       Print tenant/target/scope/expiry of the current token.
  *   refresh      Force a refresh-token rotation.
- *   heartbeat    Cheap liveness ping: signed GET /v1/targets/connector-status. Wires
+ *   heartbeat    Cheap liveness ping: Bearer-only GET /v1/targets/connector-status?plugin_version=. Wires
  *                into cron / systemd-timer so paired CLIs that don't run
  *                every day still keep their OAuth chain alive — the ping
  *                auto-rotates the access token (24h TTL) and refresh token
@@ -350,8 +350,8 @@ function patcherly_cli_refresh(array $opts): void
 /**
  * Cheap liveness ping that keeps the OAuth chain and target alive.
  *
- * Performs a single signed `GET /v1/targets/connector-status` after running the
- * bundle through `patcherly_oauth_ensure_fresh_token`. That single call:
+ * Performs a Bearer-only `GET /v1/targets/connector-status?plugin_version=` after
+ * running the bundle through `patcherly_oauth_ensure_fresh_token`. That single call:
  *
  *   1. Rotates the access token when it's within the 30s refresh window
  *      (default 24h TTL on the access token, 30-day TTL on the refresh
@@ -386,6 +386,10 @@ function patcherly_cli_heartbeat(array $opts): void
         exit(2);
     }
     $url = rtrim((string) $opts['api-base'], '/') . PatcherlyApiPaths::NAMED_TARGETS_CONNECTOR_STATUS;
+    if (defined('PATCHERLY_CONNECTOR_VERSION') && PATCHERLY_CONNECTOR_VERSION !== '') {
+        $sep = (strpos($url, '?') === false) ? '?' : '&';
+        $url .= $sep . 'plugin_version=' . rawurlencode((string) PATCHERLY_CONNECTOR_VERSION);
+    }
     $ch  = curl_init($url);
     if ($ch === false) {
         fwrite(STDERR, "patcherly: cURL init failed for $url\n");

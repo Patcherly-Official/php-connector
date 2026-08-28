@@ -10,6 +10,9 @@ declare(strict_types=1);
 const PATCHERLY_FIX_APPROVE_STATUSES = ['awaiting_approval', 'manual_review_required'];
 
 /** @var list<string> */
+const PATCHERLY_ALREADY_APPROVED_APPLY_STATUSES = ['approved', 'applying'];
+
+/** @var list<string> */
 const PATCHERLY_APPROVE_409_SOFT_STOP_CODES = [
     'empty_fix',
     'error_path_blocked',
@@ -47,6 +50,10 @@ function patcherly_http_error_code($payload): ?string {
 
 function patcherly_is_fix_approve_status(?string $status): bool {
     return $status !== null && in_array($status, PATCHERLY_FIX_APPROVE_STATUSES, true);
+}
+
+function patcherly_is_already_approved_apply_status(?string $status): bool {
+    return $status !== null && in_array($status, PATCHERLY_ALREADY_APPROVED_APPLY_STATUSES, true);
 }
 
 function patcherly_is_approve_409_soft_stop(?string $code): bool {
