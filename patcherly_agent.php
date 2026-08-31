@@ -2881,6 +2881,9 @@ function patcherly_php_local_router() {
                         $payload = ['resolution' => $resolution];
                     }
                     $apiPath = PatcherlyApiPaths::appPath('errors', rawurlencode($id), $act === 'reject-patch' ? 'reject-patch' : 'approve');
+                    if ($act === 'approve') {
+                        $apiPath .= '?approve_intent=manual';
+                    }
                     [$resp, $code] = $sendSignedWithStatus->invoke($agent, 'POST', $apiPath, $payload);
                     http_response_code($code ?: 200);
                     echo is_string($resp) && $resp !== '' ? $resp : '{}';
