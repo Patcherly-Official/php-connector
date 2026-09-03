@@ -9,7 +9,7 @@ declare(strict_types=1);
  * Subcommands:
  *   login        Run the device-authorization flow and save the token bundle.
  *   logout       Revoke the current token and delete the local credential file.
- *   status       Print tenant/target/scope/expiry of the current token.
+ *   status       Print workspace/site/scope/expiry of the current token.
  *   refresh      Force a refresh-token rotation.
  *   heartbeat    Cheap liveness ping: Bearer-only GET /v1/targets/connector-status?plugin_version=. Wires
  *                into cron / systemd-timer so paired CLIs that don't run
@@ -24,9 +24,9 @@ declare(strict_types=1);
  *                failure (so cron emits the mail you want to see).
  *   send-test    Post a synthetic test event to /errors/ingest-test. To
  *                protect your real metrics and notifications, the API only
- *                accepts these synthetic events while the per-target **Test
+ *                accepts these synthetic events while the per-site **Test
  *                Mode** window is open. Open it in your Patcherly dashboard
- *                first (Targets → click your target → **Test Mode** toggle →
+ *                first (Sites → click your site → **Test Mode** toggle →
  *                a 30-minute window opens), then run `send-test` from this
  *                host. The CLI auto-preflights `/v1/targets/connector-status` and
  *                prints the dashboard URL if Test Mode is off, so a doomed
@@ -429,7 +429,7 @@ function patcherly_cli_heartbeat(array $opts): void
             'last_connected_at' => $payload['last_connected_at'] ?? null,
         ], JSON_PRETTY_PRINT) . "\n");
     } else {
-        fwrite(STDERR, "patcherly: heartbeat OK - target alive.\n");
+        fwrite(STDERR, "patcherly: heartbeat OK - site alive.\n");
     }
 }
 
@@ -485,8 +485,8 @@ function patcherly_cli_preflight_test_mode(string $apiBase, string $accessToken)
 
 function patcherly_cli_emit_test_window_closed(array $opts, ?string $dashboardUrl, ?string $expiresHint): void
 {
-    $msg = 'Test mode window is not open for this target. Enable test mode from your '
-        . 'Patcherly dashboard (Targets → Test Mode toggle), then retry.';
+    $msg = 'Test mode window is not open for this site. Enable test mode from your '
+        . 'Patcherly dashboard (Sites → Test Mode toggle), then retry.';
     if (!empty($opts['json'])) {
         $out = ['error' => 'test_window_closed', 'message' => $msg];
         if ($dashboardUrl !== null && $dashboardUrl !== '') {
@@ -570,7 +570,7 @@ function patcherly_cli_send_test(array $opts): void
     }
     $detail = $payload['detail'] ?? null;
     if ($status === 403 && is_array($detail) && ($detail['code'] ?? '') === 'test_window_closed') {
-        $msg  = (string) ($detail['message'] ?? 'Test mode window is not open for this target.');
+        $msg  = (string) ($detail['message'] ?? 'Test mode window is not open for this site.');
         $link = (string) ($detail['dashboard_url'] ?? '');
         if (!empty($opts['json'])) {
             fwrite(STDOUT, json_encode([

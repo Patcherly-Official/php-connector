@@ -466,7 +466,7 @@ class PHPAgent {
         }
         $this->enterProtectionModeStandby($until);
         error_log(
-            'Patcherly: target entered protection mode standby until ' .
+            'Patcherly: site entered protection mode standby until ' .
             ($until ?: 'manual release') . '; pausing ingest and fix polling.'
         );
         return true;
@@ -1474,7 +1474,7 @@ class PHPAgent {
         // v1.49: only chain into approve+apply when autoApply is also true. Otherwise the
         // human approves & applies the analyzed fix from the dashboard.
         if (!$autoApply) {
-            echo "Auto-apply not enabled for this target; stopping after analyze. "
+            echo "Auto-apply not enabled for this site; stopping after analyze. "
                 . "Review & approve from the dashboard.\n";
             return;
         }
@@ -1509,7 +1509,7 @@ class PHPAgent {
                     return;
                 }
                 if ($code === 'auto_apply_not_enabled') {
-                    echo "Auto-apply not enabled for this target (server-side gate); stopping "
+                    echo "Auto-apply not enabled for this site (server-side gate); stopping "
                         . "auto-pipeline — review and approve from the dashboard.\n";
                     return;
                 }
