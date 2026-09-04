@@ -1,21 +1,87 @@
-MIT License
+Patcherly Connector License (Proprietary)
 
-Copyright (c) 2025-2026 Shambix (Patcherly)
+Copyright (c) 2025-2026 Shambix. All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+Product: Patcherly
+Owner: Shambix
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+Patcherly is a registered trademark, property of Shambix.
+All other trademarks are the property of their respective owners.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+This license applies to the Patcherly PHP connector (`patcherly/php-connector`)
+and associated documentation files in this package.
+
+1. Definitions
+
+"Software" means the Patcherly PHP connector client code and associated
+documentation files distributed under this license.
+
+"Service" means the hosted Patcherly product operated by Shambix
+(including api.patcherly.com and app.patcherly.com).
+
+"Customer Application" means software or sites that you own or control and
+connect to the Service using the Software.
+
+2. License grant
+
+Subject to these terms and the Patcherly Terms of Service, Shambix grants you
+a limited, non-exclusive, non-transferable, revocable license to:
+
+(a) install and run the Software solely to connect your Customer Applications
+    to the Service; and
+(b) modify the Software solely for that same purpose on systems you own or
+    control.
+
+No other rights are granted. Official product support applies only to
+unmodified Software obtained from Shambix official sources, as described in
+our documentation and Terms of Service.
+
+3. Restrictions
+
+You may NOT:
+
+(a) redistribute, publish, sublicense, lease, sell, or otherwise make the
+    Software (or substantial portions of it) available to third parties,
+    whether modified or unmodified, except as necessary for your internal
+    deployment to your own Customer Applications;
+(b) use the Software, or any substantial portion of it, to build, operate,
+    offer, or assist a competing or substantially similar product or service;
+(c) remove, obscure, or alter proprietary notices, copyright notices, or
+    trademark notices;
+(d) use Patcherly or Shambix trademarks except as permitted by the Terms of
+    Service or nominative fair use; or
+(e) claim ownership of the Software or imply endorsement by Shambix beyond
+    factual identification of Patcherly as your vendor.
+
+4. Ownership
+
+Shambix retains all right, title, and interest in and to the Software,
+including all intellectual property rights. This license does not transfer
+ownership.
+
+5. Termination
+
+This license terminates automatically if you breach these terms or the Terms
+of Service. Upon termination you must stop using the Software and destroy
+copies in your possession, except as required by law for archival retention.
+
+6. Disclaimer of warranty
+
+THE SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+
+7. Limitation of liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, SHAMBIX SHALL NOT BE LIABLE FOR ANY
+INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, OR PUNITIVE DAMAGES, OR ANY
+LOSS OF PROFITS, DATA, OR GOODWILL, ARISING OUT OF OR RELATED TO THE SOFTWARE.
+
+8. Governing documents
+
+Use of the Service is governed by the Patcherly Terms of Service and related
+legal policies at https://patcherly.com/legal/. If this license conflicts with
+those documents regarding the Service, those documents control for Service
+use; this license controls for the Software itself.
+
+Licensing inquiries: legal@patcherly.com

@@ -2,7 +2,7 @@
     "name": "patcherly/php-connector",
     "description": "Patcherly detects bugs in real time in your app.  It creates a customized AI patch, and once you approve it, backs up your code, fixes it & tests the patch for you. If anything is off, it rolls back the changes automatically, or you can always roll it back in a click. Website: https://patcherly.com · Docs: https://help.patcherly.com/connectors/php/",
     "type": "library",
-    "license": "MIT",
+    "license": "proprietary",
     "homepage": "https://patcherly.com",
     "support": {
         "docs": "https://help.patcherly.com/connectors/php/",

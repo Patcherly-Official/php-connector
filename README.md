@@ -106,6 +106,8 @@ OAuth pairing and per-token **HMAC signing**; fix payloads are verified before a
 
 ## License
 
-[MIT](LICENSE)
+[Proprietary limited-use](LICENSE) — run and modify only to connect your own apps to Patcherly; no redistribute or competitive reuse.
+
+**Patcherly** is a registered trademark, property of Shambix.
 
 Using the **Patcherly service** is governed by our [Terms of Service](https://patcherly.com/legal/terms-of-service) and [Acceptable Use](https://patcherly.com/legal/acceptable-use) policy. Official product support applies only to **unmodified** connector releases from our official sources.
