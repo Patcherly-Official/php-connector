@@ -163,7 +163,7 @@ class AgentBackupManager {
             if (!$this->isPathWithinAllowedRoots($filePath)) {
                 throw new Exception("Refusing backup outside allowed target roots: {$filePath}");
             }
-            // Missing files the patch will create — skip-OK
+            // Missing files the patch will create - skip-OK
             if (!file_exists($filePath)) {
                 error_log("File not found, skipping: {$filePath}");
                 continue;
@@ -219,7 +219,7 @@ class AgentBackupManager {
                 
             } catch (Exception $e) {
                 error_log("Failed to backup file {$filePath}: " . $e->getMessage());
-                // Existing listed file failed snapshot — abort (no partial manifest)
+                // Existing listed file failed snapshot - abort (no partial manifest)
                 throw new Exception("Failed to backup existing file {$filePath}: " . $e->getMessage(), 0, $e);
             }
         }

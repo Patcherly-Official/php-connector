@@ -155,7 +155,7 @@ function patcherly_looks_incomplete_error_block(array $lines): bool {
 function patcherly_extract_error_events(array $lines, bool $holdIncomplete = true): array {
     $events = [];
     $current = [];
-    // Stack frames / "Stack trace:" / Node "at" are continuation-only — never
+    // Stack frames / "Stack trace:" / Node "at" are continuation-only - never
     // start a new event alone (that created orphan stack-only incidents next to
     // "work/N failed:" companion lines that lack \berror\b).
     $startOrCont = '/^(Traceback\s|File\s+["\']|Exception:|Error:\s|PHP\s+(?:Fatal|Parse|Warning|Notice|Deprecated))/i';
@@ -176,7 +176,7 @@ function patcherly_extract_error_events(array $lines, bool $holdIncomplete = tru
         }
         $stripped = trim($line);
         // PHP fatals emit "Stack trace:" then #N frames then "thrown in path:line".
-        // Those must stay on the same event as the PHP Fatal header — otherwise
+        // Those must stay on the same event as the PHP Fatal header - otherwise
         // log-monitor ingest creates header-only + stack-only duplicates.
         $isContinuation = count($current) > 0 && (
             str_starts_with($line, ' ')

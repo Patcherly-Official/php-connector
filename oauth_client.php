@@ -1,6 +1,6 @@
 <?php
 /**
- * OAuth 2.0 Device Authorization Grant client (RFC 8628) — PHP connector.
+ * OAuth 2.0 Device Authorization Grant client (RFC 8628) - PHP connector.
  *
  * Pairs with server/app/api/routers/oauth.py. Uses cURL (already a hard dep
  * of the PHP agent's API client) and matches the same request/response shape

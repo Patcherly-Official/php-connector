@@ -26,7 +26,7 @@ class Sanitizer
      */
     private const MULTILINE_SENSITIVE_PATTERNS = [
         // `[A-Z ]*` (not `+`) so PKCS#8 unencrypted keys
-        // (`-----BEGIN PRIVATE KEY-----` with no algorithm prefix — the
+        // (`-----BEGIN PRIVATE KEY-----` with no algorithm prefix - the
         // format `openssl pkcs8` exports for modern Ed25519/RSA/EC keys)
         // get redacted alongside OPENSSH / RSA / DSA / EC / ENCRYPTED
         // PRIVATE KEY blocks.
@@ -131,7 +131,7 @@ class Sanitizer
         $redactionTypes = [];
 
         // Lines that the multi-line pre-pass just touched (look for the literal
-        // replacement markers — extended in 1.47.0 V3 to also cover SSH
+        // replacement markers - extended in 1.47.0 V3 to also cover SSH
         // public-key blobs).
         $multilineMarkers = ['PRIVATE_KEY_REDACTED', 'SSH_PUBLIC_KEY_REDACTED'];
         foreach ($lines as $i => $line) {

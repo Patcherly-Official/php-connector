@@ -65,7 +65,7 @@ function patcherly_get_context_consent(): array
         if ($tier !== null) {
             return [$tier, 'env'];
         }
-        // Invalid env value — fall through to file / default (matches Python behavior).
+        // Invalid env value - fall through to file / default (matches Python behavior).
     }
     try {
         $path = patcherly_consent_file_path();
@@ -78,7 +78,7 @@ function patcherly_get_context_consent(): array
             }
         }
     } catch (\Throwable $e) {
-        // IO error — fall through to default.
+        // IO error - fall through to default.
     }
     return [PATCHERLY_DEFAULT_CONSENT_TIER, 'default'];
 }

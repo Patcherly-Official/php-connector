@@ -5,13 +5,13 @@
 # Patcherly PHP connector
 
 **Auto-detect and fix production errors in your PHP apps.**
-Standalone agent for Laravel, Symfony, and custom PHP — pairs with your Patcherly account.
+Standalone agent for Laravel, Symfony, and custom PHP: pairs with your Patcherly account.
 
-**For a limited time:** [30-day Pro trial](https://help.patcherly.com/billing/trial/) — no credit card required. Cancel anytime. [Sign up](https://patcherly.com).
+**For a limited time:** [30-day Pro trial](https://help.patcherly.com/billing/trial/) - no credit card required. Cancel anytime. [Sign up](https://patcherly.com).
 
 [![Packagist patcherly/php-connector](https://img.shields.io/packagist/v/patcherly/php-connector?label=PHP&logo=packagist&logoColor=white&style=flat-square)](https://packagist.org/packages/patcherly/php-connector)
 [![Documentation](https://img.shields.io/badge/Documentation-help.patcherly.com-1869f5?style=flat-square)](https://help.patcherly.com/connectors/php/)
-[![Discord — join](https://img.shields.io/badge/Discord-join-5865f2?logo=discord&logoColor=white&style=flat-square)](https://discord.gg/7yZkD9KNsS)
+[![Discord - join](https://img.shields.io/badge/Discord-join-5865f2?logo=discord&logoColor=white&style=flat-square)](https://discord.gg/7yZkD9KNsS)
 
 > Prefer `@latest` / unpinned Composer installs, or pin from [GitHub Releases](https://github.com/Patcherly-Official/patcherly-connector-packages/releases/latest).
 
@@ -28,7 +28,7 @@ One command downloads the PHP agent and launches OAuth pairing:
 | macOS / Linux / WSL | `curl -sSL https://api.patcherly.com/install \| sudo CONNECTOR_TYPE=php bash` |
 | Windows PowerShell | `$env:CONNECTOR_TYPE = 'php'; irm "https://api.patcherly.com/install.ps1" \| iex` |
 
-The CLI prints a **verification URL** and a short **user code** — open the URL, sign in, pick your site, and confirm. Credentials are saved to `~/.patcherly/credentials.json` (or `/root/.patcherly/` when run as root). Then start the agent — see [After install](#after-install).
+The CLI prints a **verification URL** and a short **user code** - open the URL, sign in, pick your site, and confirm. Credentials are saved to `~/.patcherly/credentials.json` (or `/root/.patcherly/` when run as root). Then start the agent - see [After install](#after-install).
 
 Full installer options (paths, `SKIP_LOGIN`, older versions): [Installing a connector](https://help.patcherly.com/getting-started/installing-connector/).
 
@@ -45,7 +45,7 @@ Then run the long-lived agent (from the package tree or your install directory):
 php patcherly_agent.php
 ```
 
-Optional on quiet hosts: `patcherly heartbeat` from a daily cron / systemd timer so the connection stays fresh — see the [PHP guide](https://help.patcherly.com/connectors/php/#keep-the-connection-alive-on-quiet-hosts-patcherly-heartbeat).
+Optional on quiet hosts: `patcherly heartbeat` from a daily cron / systemd timer so the connection stays fresh - see the [PHP guide](https://help.patcherly.com/connectors/php/#keep-the-connection-alive-on-quiet-hosts-patcherly-heartbeat).
 
 ## Pair later (or re-pair)
 
@@ -60,7 +60,7 @@ Optional on quiet hosts: `patcherly heartbeat` from a daily cron / systemd timer
 ## After install
 
 - Status and approvals: **Sites** in your [Patcherly dashboard](https://app.patcherly.com/targets).
-- Start and keep the agent running — on Linux with the universal installer: `systemctl start patcherly-connector`. Otherwise run `start.sh` / `start.ps1`, or `php patcherly_agent.php`. Details: [PHP connector guide](https://help.patcherly.com/connectors/php/).
+- Start and keep the agent running - on Linux with the universal installer: `systemctl start patcherly-connector`. Otherwise run `start.sh` / `start.ps1`, or `php patcherly_agent.php`. Details: [PHP connector guide](https://help.patcherly.com/connectors/php/).
 - Path exclusions and patch policies: [Path rules for sites](https://help.patcherly.com/getting-started/path-exclusion/).
 
 ## Test Mode (sample error)
@@ -92,7 +92,7 @@ Env override: `PATCHERLY_CONTEXT_CONSENT`.
 OAuth pairing and per-token **HMAC signing**; fix payloads are verified before apply. Built-in redaction runs before ingest; you can add custom sanitizer patterns per site.
 
 - [Connectors overview](https://help.patcherly.com/connectors/overview/)
-- [PHP connector — HMAC](https://help.patcherly.com/connectors/php/#hmac-signing)
+- [PHP connector: HMAC](https://help.patcherly.com/connectors/php/#hmac-signing)
 - [Prompt injection protection](https://help.patcherly.com/security/prompt-injection-protection/)
 - [Custom sanitizer patterns](https://help.patcherly.com/security/custom-sanitizer-patterns/)
 - [Post-apply restart safety](https://help.patcherly.com/security/post-apply-restart-safety/)
@@ -100,13 +100,13 @@ OAuth pairing and per-token **HMAC signing**; fix payloads are verified before a
 
 ## Documentation & support
 
-- **[PHP connector guide](https://help.patcherly.com/connectors/php/)** — install, systemd/cron, troubleshooting
+- **[PHP connector guide](https://help.patcherly.com/connectors/php/)** - install, systemd/cron, troubleshooting
 - **[Connectors overview](https://help.patcherly.com/connectors/overview/)** · **[All connectors](https://github.com/Patcherly-Official/patcherly-connector-packages#readme)**
 - **[Discord](https://discord.gg/7yZkD9KNsS)** · **[Dashboard](https://app.patcherly.com)** · **[Report a bug](https://github.com/Patcherly-Official/patcherly-connector-packages/issues)**
 
 ## License
 
-[Proprietary limited-use](LICENSE) — run and modify only to connect your own apps to Patcherly; no redistribute or competitive reuse.
+[Proprietary limited-use](LICENSE) - run and modify only to connect your own apps to Patcherly; no redistribute or competitive reuse.
 
 **Patcherly** is a registered trademark, property of Shambix.
 

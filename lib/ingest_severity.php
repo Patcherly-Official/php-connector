@@ -1,5 +1,5 @@
 <?php
-/** AUTO-GENERATED from config/settings_schema.yaml + log_ingest_skip_patterns.yaml — do not edit by hand. */
+/** AUTO-GENERATED from config/settings_schema.yaml + log_ingest_skip_patterns.yaml - do not edit by hand. */
 declare(strict_types=1);
 
 if (!function_exists('patcherly_shared_should_skip_log_line_for_ingest')) {

@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 /**
- * `patcherly` CLI — PHP connector OAuth onboarding (Phase-4).
+ * `patcherly` CLI: PHP connector OAuth onboarding (Phase-4).
  *
  * Subcommands:
  *   login        Run the device-authorization flow and save the token bundle.
@@ -13,7 +13,7 @@ declare(strict_types=1);
  *   refresh      Force a refresh-token rotation.
  *   heartbeat    Cheap liveness ping: Bearer-only GET /v1/targets/connector-status?plugin_version=. Wires
  *                into cron / systemd-timer so paired CLIs that don't run
- *                every day still keep their OAuth chain alive — the ping
+ *                every day still keep their OAuth chain alive - the ping
  *                auto-rotates the access token (24h TTL) and refresh token
  *                (30-day TTL) on every call, and the server-side bearer
  *                validator bumps `targets.last_connected_at` so the dashboard
@@ -198,7 +198,7 @@ function patcherly_cli_upload_context_after_pairing(array $opts, array $bundle):
             fwrite(STDERR, "[patcherly] Context upload rejected (413 payload too large); try minimal consent\n");
         }
     } catch (\Throwable $e) {
-        // Non-critical — soft-fail
+        // Non-critical - soft-fail
     }
 }
 
@@ -244,7 +244,7 @@ function patcherly_cli_context_cmd(array $opts): void
         $store  = new PatcherlyCredentialStore();
         $bundle = $store->load();
         if ($bundle === null || empty($bundle['access_token'])) {
-            fwrite(STDERR, "patcherly: not paired — run login first\n");
+            fwrite(STDERR, "patcherly: not paired - run login first\n");
             exit(2);
         }
         patcherly_cli_upload_context_after_pairing($opts, $bundle);

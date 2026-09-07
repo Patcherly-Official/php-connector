@@ -1,5 +1,5 @@
 <?php
-/** AUTO-GENERATED from config/api_paths.yaml — do not edit by hand. */
+/** AUTO-GENERATED from config/api_paths.yaml - do not edit by hand. */
 declare(strict_types=1);
 
 final class PatcherlyApiPaths

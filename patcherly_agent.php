@@ -128,7 +128,7 @@ class PHPAgent {
 
         $resolved = realpath($stripped);
         if ($resolved === false) {
-            // File may not exist yet — fall back to a structural normalization.
+            // File may not exist yet - fall back to a structural normalization.
             $resolved = $stripped;
         }
         $norm = str_replace('\\', '/', $resolved);
@@ -265,7 +265,7 @@ class PHPAgent {
 
     /**
      * POST discovered log path metadata (existence/readability) to the API for dashboard display.
-     * Reports ALL server-provided paths — no hardcoded fallback lists.
+     * Reports ALL server-provided paths - no hardcoded fallback lists.
      */
     private function reportDiscoveredLogPaths() : void {
         if (!$this->targetId) {
@@ -656,7 +656,7 @@ class PHPAgent {
                 $this->contextLastUpload = $now;
             }
         } catch (\Throwable $e) {
-            // Non-critical — soft-fail, never crash agent
+            // Non-critical - soft-fail, never crash agent
             error_log('[patcherly] Context upload skipped: ' . $e->getMessage());
         }
     }
@@ -673,7 +673,7 @@ class PHPAgent {
     /**
      * Fetch post-apply manifest JSON for the current target.
      * Request is OAuth+HMAC signed; response is plain JSON (API does not sign
-     * post-apply-config/connector — unlike GET /fix). Returns null on transport
+     * post-apply-config/connector - unlike GET /fix). Returns null on transport
      * failure so callers omit `post_apply`.
      */
     private function getPostApplyConnectorJson() {
@@ -1044,7 +1044,7 @@ class PHPAgent {
      * Returns ['rc', 'stdout', 'stderr', 'timed_out'].
      *
      * proc_open accepts an array<int,string> as the first argument since PHP
-     * 7.4 — under that signature PHP does NOT invoke /bin/sh, so shell
+     * 7.4 - under that signature PHP does NOT invoke /bin/sh, so shell
      * metacharacters in tokens are inert.
      */
     private function execArgvWithTimeout(array $argv, string $cwd, int $timeoutS) : array {
@@ -1054,12 +1054,12 @@ class PHPAgent {
             2 => ['pipe', 'w'],
         ];
         $env = null;  // inherit current env
-        // Older PHP (<7.4) cannot take an array — degrade gracefully by
+        // Older PHP (<7.4) cannot take an array - degrade gracefully by
         // refusing to exec rather than dropping to shell mode.
         if (PHP_VERSION_ID < 70400) {
             return ['rc' => -3, 'stdout' => '', 'stderr' => 'php_version_below_7_4_unsupported', 'timed_out' => false];
         }
-        // FP (semgrep): proc_open with argv array — no shell invocation (PHP 7.4+).
+        // FP (semgrep): proc_open with argv array - no shell invocation (PHP 7.4+).
         // nosemgrep: php.lang.security.exec-use.exec-use
         $proc = @proc_open($argv, $descriptors, $pipes, $cwd, $env);
         if (!is_resource($proc)) {
@@ -1073,6 +1073,9 @@ class PHPAgent {
         $start = microtime(true);
         $timedOut = false;
         $maxBytes = 4 * 1024 * 1024;
+        // Prefer exitcode from the first proc_get_status() that sees the process
+        // stop - later proc_close() often returns -1 after PHP has already reaped.
+        $exitCode = null;
         while (true) {
             $status = proc_get_status($proc);
             $chunkOut = stream_get_contents($pipes[1]);
@@ -1081,7 +1084,12 @@ class PHPAgent {
             if ($chunkErr !== false) $stderr .= $chunkErr;
             if (strlen($stdout) > $maxBytes) $stdout = substr($stdout, 0, $maxBytes);
             if (strlen($stderr) > $maxBytes) $stderr = substr($stderr, 0, $maxBytes);
-            if (!$status['running']) break;
+            if (!$status['running']) {
+                if (array_key_exists('exitcode', $status) && (int)$status['exitcode'] !== -1) {
+                    $exitCode = (int)$status['exitcode'];
+                }
+                break;
+            }
             if ((microtime(true) - $start) >= $timeoutS) {
                 $timedOut = true;
                 @proc_terminate($proc, 15);  // SIGTERM
@@ -1089,6 +1097,8 @@ class PHPAgent {
                 $st2 = proc_get_status($proc);
                 if ($st2['running']) {
                     @proc_terminate($proc, 9);  // SIGKILL
+                } elseif (array_key_exists('exitcode', $st2) && (int)$st2['exitcode'] !== -1) {
+                    $exitCode = (int)$st2['exitcode'];
                 }
                 break;
             }
@@ -1102,6 +1112,9 @@ class PHPAgent {
         fclose($pipes[1]);
         fclose($pipes[2]);
         $rc = proc_close($proc);
+        if ($exitCode !== null) {
+            $rc = $exitCode;
+        }
         if ($timedOut) $rc = -2;
         return [
             'rc' => (int)$rc,
@@ -1160,7 +1173,7 @@ class PHPAgent {
         if ($expectedSha !== '') {
             $actual = hash('sha256', $rawYaml);
             if ($actual !== $expectedSha) {
-                error_log('[patcherly] post-apply manifest content_sha256 mismatch — refusing to run steps');
+                error_log('[patcherly] post-apply manifest content_sha256 mismatch - refusing to run steps');
                 return ['failed' => true, 'ran' => false, 'message' => 'content_sha256_mismatch'];
             }
         }
@@ -1197,7 +1210,7 @@ class PHPAgent {
      * vendor/bin/phpunit is a `.bat` shim, and so we never accidentally
      * shell out. This mirrors the patcherly_agent.py pattern of
      * `[sys.executable, '-m', 'pytest']` and patcherly_agent.js's argv-form
-     * `execFile('npm', ['test'])` — both rely on a known interpreter and
+     * `execFile('npm', ['test'])` - both rely on a known interpreter and
      * never go through /bin/sh.
      */
     private function detectPhpTestRunner() {
@@ -1226,7 +1239,7 @@ class PHPAgent {
      * exec primitive fails.
      *
      * Pure helper exposed for unit tests in
-     * connectors/php/tests/post_apply_steps_test.php — does NOT do any
+     * connectors/php/tests/post_apply_steps_test.php - does NOT do any
      * network I/O. The networked POST happens in runTestsAndReport().
      *
      * @return array Payload ready for POST to /v1/errors/{id}/test/results.
@@ -1234,7 +1247,7 @@ class PHPAgent {
     private function buildTestResultsPayload(string $errorId, bool $applySuccess) : array {
         $detected = $this->detectPhpTestRunner();
         if ($detected === null) {
-            // No vendor/bin/phpunit or vendor/bin/pest on disk — mirror the
+            // No vendor/bin/phpunit or vendor/bin/pest on disk - mirror the
             // Node connector's behaviour when package.json has no test
             // script, so the dashboard can show "skipped" rather than a
             // misleading "passed".
@@ -1306,7 +1319,7 @@ class PHPAgent {
             ];
         } catch (\Throwable $e) {
             // execArgvWithTimeout is defensive but PHP_BINARY could be
-            // unavailable (e.g. embedded SAPI) — fall back to the synthetic
+            // unavailable (e.g. embedded SAPI) - fall back to the synthetic
             // smoke row so the dashboard still gets something.
             return [
                 'error_id' => $errorId,
@@ -1366,7 +1379,7 @@ class PHPAgent {
         // PRIMARY FILTERING: require extractable source path; skip excluded paths
         $filePath = $this->extractFilePath($errorContext);
         if (!$filePath) {
-            return; // Not ingestable — no file to back up or patch
+            return; // Not ingestable - no file to back up or patch
         }
         if ($this->isPathExcluded($filePath)) {
             echo "Error from excluded path skipped: $filePath\n";
@@ -1505,12 +1518,12 @@ class PHPAgent {
                     $conf = $detail['confidence'] ?? '?';
                     $thresh = $detail['threshold'] ?? '?';
                     echo "Fix confidence too low to auto-approve ({$conf}% < {$thresh}%); "
-                        . "stopping auto-pipeline — review and approve from the dashboard.\n";
+                        . "stopping auto-pipeline - review and approve from the dashboard.\n";
                     return;
                 }
                 if ($code === 'auto_apply_not_enabled') {
                     echo "Auto-apply not enabled for this site (server-side gate); stopping "
-                        . "auto-pipeline — review and approve from the dashboard.\n";
+                        . "auto-pipeline - review and approve from the dashboard.\n";
                     return;
                 }
                 if ($code === 'empty_fix') {
@@ -1577,7 +1590,7 @@ class PHPAgent {
             $success = $applyResult['success'] ?? false;
 
             // v1.47 C1: Post-apply manifest. Only run when apply succeeded AND
-            // this is not a dry-run preview — mirrors python/node, which skip
+            // this is not a dry-run preview - mirrors python/node, which skip
             // the restart in dry-run mode so a preview never bounces the app.
             $postApplyResult = null;
             if ($success && !$targetDryRun) {
@@ -1585,7 +1598,7 @@ class PHPAgent {
                     $postApplyResult = $this->maybeRunPostApply((string)$id, is_array($data) ? $data : []);
                 } catch (\Throwable $e) {
                     error_log('[patcherly] maybeRunPostApply raised: ' . $e->getMessage());
-                    $postApplyResult = null;  // fail-open — apply-result must still report
+                    $postApplyResult = null;  // fail-open - apply-result must still report
                 }
             }
 
@@ -1621,7 +1634,7 @@ class PHPAgent {
                 $applyPayload['post_apply'] = $postApplyResult;
             }
 
-            // Capture HTTP status so we can detect 409 — server-side CAS already
+            // Capture HTTP status so we can detect 409 - server-side CAS already
             // advanced this error (race with another connector callback). Treat
             // 409 as terminal: log, do not retry, continue with the next pending
             // error. The server is canonical.
@@ -1683,8 +1696,7 @@ class PHPAgent {
         /**
          * Extract file paths from fix content.
          * Handles unified diff format, JSON with patch field, etc.
-         * Returns an empty array when nothing is found (caller refuses apply —
-         * never defaults to the monitored log file; WP parity).
+         * Returns an empty array when nothing is found (caller refuses apply - * never defaults to the monitored log file; WP parity).
          */
         $files = [];
         
@@ -1718,13 +1730,13 @@ class PHPAgent {
      * Resolve a patch path to an absolute file under cwd / PATCHERLY_TARGET_ROOTS.
      *
      * AI diffs often use paths like ``app/Logic.php`` while the Docker demo agent
-     * already has cwd ``/app`` — without stripping the redundant root segment,
+     * already has cwd ``/app`` - without stripping the redundant root segment,
      * backup/apply look for ``/app/app/Logic.php`` and refuse the path.
      */
     /**
      * Resolve a patch path under cwd / PATCHERLY_TARGET_ROOTS.
      * Handles cwd basename matching the first path segment (e.g. cwd `/app` +
-     * diff `app/Logic.php` → `/app/Logic.php`). Existence-based — not localhost-only.
+     * diff `app/Logic.php` → `/app/Logic.php`). Existence-based - not localhost-only.
      * Prefers exact nested paths; does not fall back to bare basename (wrong-file risk).
      */
     private function resolvePatchTargetPath(string $filePath): string {
@@ -1790,7 +1802,7 @@ class PHPAgent {
     public function applyFix($fix, $errorId = null, $dryRun = false) {
         echo "Applying fix (dry_run=" . ($dryRun ? 'true' : 'false') . "): " . substr($fix, 0, 100) . "...\n";
         
-        // Extract file paths from fix — resolve before backup so allow-list checks
+        // Extract file paths from fix - resolve before backup so allow-list checks
         // see /app/Logic.php rather than a cwd-relative app/Logic.php miss.
         $filesToBackup = [];
         foreach ($this->extractFilesFromFix($fix) as $rawPath) {
@@ -1964,7 +1976,7 @@ class PHPAgent {
         return $body;
     }
     /**
-     * Phase-4 (v1.46) — Resolve OAuth credentials, cache on success.
+     * Phase-4 (v1.46) - Resolve OAuth credentials, cache on success.
      *
      * Negative results are NOT cached: operators often start the agent before
      * ``patcherly login`` writes ``credentials.json``. Re-stat the file on each
@@ -2028,7 +2040,7 @@ class PHPAgent {
      *             ``METHOD\npath\nts\nbody``, hex).
      *
      * If no valid OAuth credentials are available the request is sent without
-     * auth headers — the API will return 401, which is the correct signal for
+     * auth headers - the API will return 401, which is the correct signal for
      * the operator to run ``patcherly login``.
      *
      * Caller-supplied headers take precedence (e.g. ``Content-Type``).
@@ -2058,7 +2070,7 @@ class PHPAgent {
         $maxWall = 8 * 60 * 60;
         $started = time();
         $asyncPath = PatcherlyApiPaths::appPath('errors', $errorId, 'analyze-async');
-        // Empty body — parity with Python/Node (HMAC covers body; do not send "[]"/"{}").
+        // Empty body - parity with Python/Node (HMAC covers body; do not send "[]"/"{}").
         [$startBody, $startCode] = $this->sendSignedWithStatus('POST', $asyncPath, null, [], true);
         if ($this->handleProtectionModeHttp((int) $startCode, is_string($startBody) ? $startBody : '')) {
             return ['terminal' => false, 'status' => 'protection_mode', 'error_id' => $errorId];
@@ -2107,7 +2119,7 @@ class PHPAgent {
      */
     /**
      * @param bool $emptyBody When true, POST with an empty body (sign '' and send '').
-     *                        Use for analyze-async / approve — not for JSON payloads.
+     *                        Use for analyze-async / approve - not for JSON payloads.
      * @return array{string|false, int}  [$body, $statusCode]
      */
     private function sendSignedWithStatus(string $method, string $path, $data = null, array $headers = [], bool $emptyBody = false): array {
@@ -2305,7 +2317,7 @@ class PHPAgent {
     }
     
     private function extractFilePath($errorContext) : ?string {
-        // Prefer deepest useful frame — shared with file_context_reader.php.
+        // Prefer deepest useful frame - shared with file_context_reader.php.
         if (empty($errorContext)) {
             return null;
         }
@@ -2324,7 +2336,7 @@ class PHPAgent {
         curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
         curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
         // Uvicorn/Starlette emit lowercase header names; Node/Python clients are
-        // case-insensitive, but this map is not — always store keys lowercased.
+        // case-insensitive, but this map is not - always store keys lowercased.
         curl_setopt($ch, CURLOPT_HEADERFUNCTION, function($ch, $header) use (&$responseHeaders) {
             $len = strlen($header);
             $header = explode(':', $header, 2);
@@ -2919,7 +2931,7 @@ if (php_sapi_name() === 'cli-server') {
 }
 
 // `PATCHERLY_AGENT_NOAUTORUN=1` suppresses the auto-bootstrap when this file
-// is `require_once`-ed from a test harness — mirrors Python's `__main__`
+// is `require_once`-ed from a test harness - mirrors Python's `__main__`
 // idiom so connectors/php/tests/*.php can load the agent class without also
 // kicking off `monitorLogs()` / discovery side-effects.
 if (php_sapi_name() === 'cli' && !getenv('PATCHERLY_AGENT_NOAUTORUN')) {
