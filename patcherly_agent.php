@@ -1569,10 +1569,10 @@ class PHPAgent {
         }
         if (isset($data['fix']) && is_string($data['fix']) && trim($data['fix']) !== '') {
             echo "Received fix: " . substr($data['fix'], 0, 100) . "...\n";
-            // v1.43 launch-readiness: target-level dry_run mirrored on the fix payload.
-            // When true, preview only -- do not write or restart. Defaults to false (legacy
-            // behaviour) for older API builds that don't surface the flag yet.
-            $targetDryRun = isset($data['dry_run']) ? (bool) $data['dry_run'] : false;
+            // Fail-closed: missing/non-bool dry_run on /fix → treat as preview-only.
+            $targetDryRun = (isset($data['dry_run']) && is_bool($data['dry_run']))
+                ? $data['dry_run']
+                : true;
             $applyResult = $this->applyFix($data['fix'], $id, $targetDryRun);
             $success = $applyResult['success'] ?? false;
 
@@ -2483,7 +2483,10 @@ class PHPAgent {
                 }
                 return;
             }
-            $targetDryRun = isset($data['dry_run']) ? (bool) $data['dry_run'] : false;
+            // Fail-closed: missing/non-bool dry_run on /fix → treat as preview-only.
+            $targetDryRun = (isset($data['dry_run']) && is_bool($data['dry_run']))
+                ? $data['dry_run']
+                : true;
             $applyResult = $this->applyFix($data['fix'], $errorId, $targetDryRun);
             $success = $applyResult['success'] ?? false;
             $postApplyResult = null;
