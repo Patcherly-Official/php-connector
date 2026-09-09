@@ -37,7 +37,7 @@ function patcherly_agent_configured_server_url(): string {
 /**
  * Bumped automatically by setup/git-hooks/bump_version_from_branch.py (pre-commit) and the
  * update-release-latest.yml workflow so the value baked into every released tarball matches
- * the GitHub release tag. Reported to the API on every context upload.
+ * the connector release version. Reported to the API on every context upload.
  */
 require_once __DIR__ . '/connector_version.php';
 

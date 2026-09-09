@@ -13,7 +13,7 @@ Standalone agent for Laravel, Symfony, and custom PHP: pairs with your Patcherly
 [![Documentation](https://img.shields.io/badge/Documentation-help.patcherly.com-1869f5?style=flat-square)](https://help.patcherly.com/connectors/php/)
 [![Discord - join](https://img.shields.io/badge/Discord-join-5865f2?logo=discord&logoColor=white&style=flat-square)](https://discord.gg/7yZkD9KNsS)
 
-> Prefer `@latest` / unpinned Composer installs, or pin from [GitHub Releases](https://github.com/Patcherly-Official/patcherly-connector-packages/releases/latest).
+> Prefer `@latest` / unpinned Composer installs, pin a version on Packagist, or download archives from the [Patcherly downloads CDN](https://download.patcherly.com/connectors).
 
 </div>
 
@@ -101,8 +101,8 @@ OAuth pairing and per-token **HMAC signing**; fix payloads are verified before a
 ## Documentation & support
 
 - **[PHP connector guide](https://help.patcherly.com/connectors/php/)** - install, systemd/cron, troubleshooting
-- **[Connectors overview](https://help.patcherly.com/connectors/overview/)** · **[All connectors](https://github.com/Patcherly-Official/patcherly-connector-packages#readme)**
-- **[Discord](https://discord.gg/7yZkD9KNsS)** · **[Dashboard](https://app.patcherly.com)** · **[Report a bug](https://github.com/Patcherly-Official/patcherly-connector-packages/issues)**
+- **[Connectors overview](https://help.patcherly.com/connectors/overview/)** · **[Downloads CDN](https://download.patcherly.com/connectors)**
+- **[Discord](https://discord.gg/7yZkD9KNsS)** · **[Dashboard](https://app.patcherly.com)**
 
 ## License
 
