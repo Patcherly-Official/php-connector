@@ -1053,7 +1053,7 @@ class PHPAgent {
             1 => ['pipe', 'w'],
             2 => ['pipe', 'w'],
         ];
-        $env = null;  // inherit current env
+        $env = $this->buildPostApplyChildEnv();
         // Older PHP (<7.4) cannot take an array - degrade gracefully by
         // refusing to exec rather than dropping to shell mode.
         if (PHP_VERSION_ID < 70400) {
@@ -1739,6 +1739,36 @@ class PHPAgent {
      * diff `app/Logic.php` → `/app/Logic.php`). Existence-based - not localhost-only.
      * Prefers exact nested paths; does not fall back to bare basename (wrong-file risk).
      */
+    /**
+     * True when candidate equals root or is a real descendant (segment-boundary safe).
+     * Mirrors Python `_path_is_within` / Node `pathIsWithinRoot`.
+     */
+    private function pathIsWithinRoot(string $candidatePath, string $rootPath): bool {
+        $rootReal = realpath($rootPath);
+        if ($rootReal === false) {
+            $rootReal = $rootPath;
+        }
+        $check = $candidatePath;
+        if (@file_exists($candidatePath)) {
+            $resolved = realpath($candidatePath);
+            if ($resolved === false) {
+                return false;
+            }
+            $check = $resolved;
+        }
+        $rootReal = rtrim(str_replace('\\', '/', (string)$rootReal), '/');
+        $checkNorm = rtrim(str_replace('\\', '/', (string)$check), '/');
+        if ($checkNorm === $rootReal) {
+            return true;
+        }
+        return strpos($checkNorm, $rootReal . '/') === 0;
+    }
+
+    /**
+     * Resolve a patch path to an absolute file under cwd / PATCHERLY_TARGET_ROOTS.
+     * Prefers exact nested paths; does not fall back to bare basename (wrong-file risk).
+     * Never returns an existing absolute path that sits outside allowed roots.
+     */
     private function resolvePatchTargetPath(string $filePath): string {
         $filePath = str_replace('\\', '/', trim($filePath));
         if ($filePath === '' || $filePath === '/dev/null') {
@@ -1785,7 +1815,11 @@ class PHPAgent {
             if ($candidate && @file_exists($candidate)) {
                 $real = realpath($candidate);
                 if ($real !== false) {
-                    return $real;
+                    foreach ($roots as $root) {
+                        if ($this->pathIsWithinRoot($real, (string)$root)) {
+                            return $real;
+                        }
+                    }
                 }
             }
         }
@@ -1796,7 +1830,53 @@ class PHPAgent {
                 return $stripped;
             }
         }
-        return rtrim((string)$cwdReal, '/\\') . DIRECTORY_SEPARATOR . ltrim($filePath, '/');
+        // Non-existent / escaped absolute - stay under roots (Python parity).
+        $underCwd = $cwdReal . DIRECTORY_SEPARATOR . ltrim($filePath, '/');
+        // When $filePath is absolute, prefer basename under cwd rather than escaping.
+        if ($filePath !== '' && ($filePath[0] === '/' || preg_match('/^[A-Za-z]:\//', $filePath))) {
+            $underCwd = rtrim((string)$cwdReal, '/\\') . DIRECTORY_SEPARATOR . basename($filePath);
+        }
+        foreach ($roots as $root) {
+            if ($this->pathIsWithinRoot($underCwd, (string)$root)) {
+                return $underCwd;
+            }
+        }
+        return rtrim((string)$cwdReal, '/\\') . DIRECTORY_SEPARATOR . basename($filePath);
+    }
+
+    /**
+     * Child env for post-apply steps: inherit process env, strip Patcherly auth keys.
+     * Customer app secrets (DATABASE_URL, etc.) remain for restart scripts.
+     *
+     * @return array<string, string>
+     */
+    private function buildPostApplyChildEnv(): array {
+        $merged = [];
+        $all = getenv();
+        if (is_array($all)) {
+            foreach ($all as $k => $v) {
+                if (is_string($k) && is_string($v)) {
+                    $merged[$k] = $v;
+                }
+            }
+        }
+        $dropExact = [
+            'PATCHERLY_OAUTH_CLIENT_ID' => true,
+            'PATCHERLY_OAUTH_CLIENT_SECRET' => true,
+            'PATCHERLY_CLIENT_ID' => true,
+            'PATCHERLY_CLIENT_SECRET' => true,
+            'PATCHERLY_ACCESS_TOKEN' => true,
+            'PATCHERLY_REFRESH_TOKEN' => true,
+            'PATCHERLY_TOKEN' => true,
+            'PATCHERLY_HMAC_SECRET' => true,
+            'PATCHERLY_API_KEY' => true,
+        ];
+        foreach (array_keys($merged) as $key) {
+            if (isset($dropExact[$key]) || preg_match('/^PATCHERLY_.*(SECRET|TOKEN|PASSWORD|CREDENTIAL|API_KEY)/i', $key)) {
+                unset($merged[$key]);
+            }
+        }
+        return $merged;
     }
 
     public function applyFix($fix, $errorId = null, $dryRun = false) {
@@ -2757,11 +2837,15 @@ function patcherly_php_local_router() {
                 };
 
                 /**
-                 * Verify the inbound request carries a valid OAuth Bearer token
-                 * matching the access_token in the local credential store.
+                 * Verify inbound local-approvals auth: Bearer + HMAC (same newline
+                 * canonical as outbound API calls). Bearer alone is not enough.
                  * Returns true on success; sends 401/503 and returns false on failure.
+                 *
+                 * @param string $method HTTP method (GET/POST)
+                 * @param string $path   Request path (e.g. /local-approvals)
+                 * @param string $body   Raw request body (empty for GET)
                  */
-                $requireBearerToken = function () : bool {
+                $requireBearerAndHmac = function (string $method, string $path, string $body = '') : bool {
                     require_once __DIR__ . '/credential_store.php';
                     $store = new PatcherlyCredentialStore();
                     $creds = $store->load();
@@ -2783,16 +2867,71 @@ function patcherly_php_local_router() {
                         echo json_encode(['success' => false, 'error' => 'Unauthorized: invalid Bearer token']);
                         return false;
                     }
+                    $hmacSecret = (string) ($creds['hmac_secret'] ?? '');
+                    if ($hmacSecret === '') {
+                        http_response_code(401);
+                        echo json_encode(['success' => false, 'error' => 'Unauthorized: HMAC secret not available']);
+                        return false;
+                    }
+                    $signature = $_SERVER['HTTP_X_PATCHERLY_SIGNATURE'] ?? '';
+                    $timestamp = $_SERVER['HTTP_X_PATCHERLY_TIMESTAMP'] ?? '';
+                    if ($signature === '' || $timestamp === '') {
+                        http_response_code(401);
+                        echo json_encode(['success' => false, 'error' => 'Unauthorized: missing signature headers']);
+                        return false;
+                    }
+                    if (!ctype_digit((string)$timestamp) || abs(time() - (int)$timestamp) > 300) {
+                        http_response_code(401);
+                        echo json_encode(['success' => false, 'error' => 'Unauthorized: timestamp expired']);
+                        return false;
+                    }
+                    $canonical = strtoupper($method) . "\n" . $path . "\n" . $timestamp . "\n" . $body;
+                    $expectedSig = hash_hmac('sha256', $canonical, $hmacSecret);
+                    if (!hash_equals($expectedSig, (string)$signature)) {
+                        http_response_code(401);
+                        echo json_encode(['success' => false, 'error' => 'Unauthorized: invalid signature']);
+                        return false;
+                    }
                     return true;
                 };
 
                 // File content endpoint for AI analysis
+                // SECURITY: HMAC contract matches Patcherly API outbound signing and
+                // WordPress (X-Patcherly-Timestamp / X-Patcherly-Signature). Bearer is
+                // not required — the central API stores only hashed access tokens and
+                // cannot send Authorization on this callback; HMAC is the strongest
+                // auth available for API→connector file-content.
                 if ($path === PatcherlyApiPaths::CONNECTOR_CONTRACT_FILE_CONTENT && $_SERVER['REQUEST_METHOD']==='POST'){
-                    if (!$requireBearerToken()) { return; }
-                    
+                    require_once __DIR__ . '/credential_store.php';
+                    $store = new PatcherlyCredentialStore();
+                    $creds = $store->load();
+                    $hmacSecret = is_array($creds) ? (string)($creds['hmac_secret'] ?? '') : '';
+                    if ($hmacSecret === '') {
+                        http_response_code(401);
+                        echo json_encode(['success' => false, 'error' => 'Unauthorized: connector not paired']);
+                        return;
+                    }
+                    $signature = $_SERVER['HTTP_X_PATCHERLY_SIGNATURE'] ?? '';
+                    $timestamp = $_SERVER['HTTP_X_PATCHERLY_TIMESTAMP'] ?? '';
+                    if ($signature === '' || $timestamp === '') {
+                        http_response_code(401);
+                        echo json_encode(['success' => false, 'error' => 'Unauthorized: missing signature headers']);
+                        return;
+                    }
+                    if (!ctype_digit((string)$timestamp) || abs(time() - (int)$timestamp) > 300) {
+                        http_response_code(401);
+                        echo json_encode(['success' => false, 'error' => 'Unauthorized: timestamp expired']);
+                        return;
+                    }
                     $input = file_get_contents('php://input');
-                    
-                    // Process request
+                    $canonical = "POST\n" . PatcherlyApiPaths::CONNECTOR_CONTRACT_FILE_CONTENT . "\n{$timestamp}\n{$input}";
+                    $expected = hash_hmac('sha256', $canonical, $hmacSecret);
+                    if (!hash_equals($expected, (string)$signature)) {
+                        http_response_code(401);
+                        echo json_encode(['success' => false, 'error' => 'Unauthorized: invalid signature']);
+                        return;
+                    }
+
                     $payload = json_decode($input, true);
                     
                     if (!$payload || !isset($payload['file_path'])) {
@@ -2818,9 +2957,8 @@ function patcherly_php_local_router() {
                         return;
                     }
 
-                    // Defence-in-depth: the Bearer token gate above stops external callers,
-                    // but we still must not serve files outside the directory the operator
-                    // launched the connector from (or PATCHERLY_TARGET_ROOTS).
+                    // Defence-in-depth: HMAC gate above stops external callers, but we
+                    // still must not serve files outside cwd / PATCHERLY_TARGET_ROOTS.
                     if (!$isPathWithinAllowedRoots($realPath)) {
                         http_response_code(403);
                         echo json_encode(['success' => false, 'error' => 'File path is outside the connector project root']);
@@ -2864,7 +3002,7 @@ function patcherly_php_local_router() {
                 }
                 
                 if ($path === '/local-approvals' && $_SERVER['REQUEST_METHOD']==='GET'){
-                    if (!$requireBearerToken()) { return; }
+                    if (!$requireBearerAndHmac('GET', '/local-approvals', '')) { return; }
                     $sendSigned = $reflection->getMethod('sendSigned');
                     $sendSigned->setAccessible(true);
                     $listPath = PatcherlyApiPaths::NAMED_ERRORS_LIST . '?status=awaiting_approval';
@@ -2873,7 +3011,8 @@ function patcherly_php_local_router() {
                     return;
                 }
                 if (preg_match('#^/local-approvals/([^/]+)/(approve|reject-patch)$#', $path, $m)){
-                    if (!$requireBearerToken()) { return; }
+                    $rawBody = (string) file_get_contents('php://input');
+                    if (!$requireBearerAndHmac('POST', $path, $rawBody)) { return; }
                     $id = $m[1]; $act = $m[2];
                     if (!preg_match($approvalIdRe, $id)) {
                         http_response_code(400);
@@ -2884,7 +3023,6 @@ function patcherly_php_local_router() {
                     $sendSignedWithStatus->setAccessible(true);
                     $payload = [];
                     if ($act === 'reject-patch') {
-                        $rawBody = (string) file_get_contents('php://input');
                         $decoded = $rawBody !== '' ? json_decode($rawBody, true) : null;
                         $resolution = is_array($decoded) ? ($decoded['resolution'] ?? '') : '';
                         $allowed = ['manual_suggestion', 'manual_own', 'not_needed'];
@@ -2916,7 +3054,7 @@ function patcherly_php_local_router() {
  *     -> serve one HTTP request via patcherly_php_local_router(), then return
  *     so `php -S` can move on to the next connection. The router covers
  *     /api/file-content (Bearer token + project-root scope) and
- *     /local-approvals/{id}/(approve|reject-patch) (Bearer token + id regex).
+ *     /local-approvals/{id}/(approve|reject-patch) (Bearer + HMAC + id regex).
  *
  *   - `cli` SAPI (i.e. plain `php patcherly_agent.php`) -> run the long-lived
  *     poll loop: discover API URL, tail the application log file, send
