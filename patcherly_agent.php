@@ -466,7 +466,7 @@ class PHPAgent {
         }
         $this->enterProtectionModeStandby($until);
         error_log(
-            'Patcherly: site entered protection mode standby until ' .
+            'Patcherly: site silence standby (protection mode or Pause) until ' .
             ($until ?: 'manual release') . '; pausing ingest and fix polling.'
         );
         return true;
@@ -1360,7 +1360,7 @@ class PHPAgent {
         echo "Processing error: $errorContext\n";
         
         if ($this->isProtectionModeStandby()) {
-            echo "Protection mode standby active; skipping ingest/fix for this error.\n";
+            echo "Site silence standby active (protection mode or Pause); skipping ingest/fix for this error.\n";
             return;
         }
 
@@ -1882,7 +1882,7 @@ class PHPAgent {
     public function applyFix($fix, $errorId = null, $dryRun = false) {
         echo "Applying fix (dry_run=" . ($dryRun ? 'true' : 'false') . "): " . substr($fix, 0, 100) . "...\n";
         
-        // Extract file paths from fix - resolve before backup so allow-list checks
+        // Extract file paths from fix - resolve so allow-list checks
         // see /app/Logic.php rather than a cwd-relative app/Logic.php miss.
         $filesToBackup = [];
         foreach ($this->extractFilesFromFix($fix) as $rawPath) {
@@ -1896,108 +1896,143 @@ class PHPAgent {
                 'backup_metadata' => null,
             ];
         }
-        
-        // Create backup before applying fix
+
+        // Order: parse → canApply preflight → backup → write.
+        // Stale / parse fails must not create a pre-apply backup then roll it back.
         $backupMetadata = null;
         try {
-            if (!$dryRun) {
-                $backupErrorId = $errorId ?: 'manual_' . bin2hex(random_bytes(4));
-                $backupMetadata = $this->backupManager->createBackup(
-                    $backupErrorId,
-                    $filesToBackup,
-                    true, // compress
-                    true  // verify
-                );
-                echo "Created backup: {$backupMetadata['backup_dir']}\n";
-            }
-            
-            // Parse and apply patch
             try {
-                // Try to parse as unified diff patch
                 $filePatches = $this->patchApplicator->parsePatch($fix);
-                echo "Parsed patch: " . count($filePatches) . " file(s) to modify\n";
-                
-                $appliedFiles = [];
-                $syntaxErrorsAll = [];
-                
-                // Apply patches to each file
-                foreach ($filePatches as $filePatch) {
-                    $filePath = $this->resolvePatchTargetPath((string)$filePatch->filePath);
-
-                    if ($this->isPathExcluded((string)$filePath)) {
-                        throw new PatchApplyError("Refusing to apply patch to excluded path: {$filePath}");
-                    }
-                    
-                    // Apply patch
-                    $result = $this->patchApplicator->applyPatch(
-                        $filePatch,
-                        $filePath,
-                        $dryRun,
-                        true // verify syntax
-                    );
-                    
-                    if (!$result['success']) {
-                        throw new PatchApplyError("Failed to apply patch to {$filePatch->filePath}: {$result['message']}");
-                    }
-                    
-                    if (!empty($result['syntaxErrors'])) {
-                        foreach ($result['syntaxErrors'] as $err) {
-                            $syntaxErrorsAll[] = "{$filePatch->filePath}: {$err}";
-                        }
-                    }
-                    
-                    $appliedFiles[] = $filePath;
-                    echo "Applied patch to {$filePath}: {$result['message']}\n";
-                }
-                
-                if ($dryRun) {
-                    return [
-                        'success' => true,
-                        'message' => "Dry-run: Patch would be applied to " . count($appliedFiles) . " file(s).",
-                        'backup_metadata' => $backupMetadata
-                    ];
-                }
-                
-                if (!empty($syntaxErrorsAll)) {
-                    echo "Syntax errors after patch application: " . implode('; ', $syntaxErrorsAll) . "\n";
-                    if ($backupMetadata) {
-                        $this->rollbackFromBackup($backupMetadata);
-                    }
-                    return [
-                        'success' => false,
-                        'message' => 'Syntax validation failed: ' . implode('; ', $syntaxErrorsAll),
-                        'backup_metadata' => $backupMetadata
-                    ];
-                }
-                
-                return [
-                    'success' => true,
-                    'message' => "Patch applied successfully to " . count($appliedFiles) . " file(s).",
-                    'backup_metadata' => $backupMetadata
-                ];
-                
             } catch (PatchParseError $e) {
                 echo "Failed to parse patch (fail closed): {$e->getMessage()}\n";
-                if ($backupMetadata) {
-                    $this->rollbackFromBackup($backupMetadata);
-                }
                 return [
                     'success' => false,
                     'message' => "Unsupported patch format: {$e->getMessage()}",
                     'reason' => 'unsupported_patch_format',
-                    'backup_metadata' => $backupMetadata,
+                    'backup_metadata' => null,
                 ];
-            } catch (PatchApplyError $e) {
-                echo "Failed to apply patch: {$e->getMessage()}\n";
+            }
+
+            echo "Parsed patch: " . count($filePatches) . " file(s) to modify\n";
+            $resolved = [];
+            foreach ($filePatches as $filePatch) {
+                $filePath = $this->resolvePatchTargetPath((string)$filePatch->filePath);
+                if ($this->isPathExcluded((string)$filePath)) {
+                    return [
+                        'success' => false,
+                        'message' => "Refusing to apply patch to excluded path: {$filePath}",
+                        'backup_metadata' => null,
+                    ];
+                }
+                $preflight = $this->patchApplicator->applyPatch(
+                    $filePatch,
+                    $filePath,
+                    true, // dry-run canApply / already-applied check
+                    true
+                );
+                if (empty($preflight['success'])) {
+                    $stale_reason = !empty($preflight['reason']) ? (string) $preflight['reason'] : null;
+                    if ($stale_reason === null
+                        && function_exists('patcherly_is_source_stale_can_apply_error')
+                        && patcherly_is_source_stale_can_apply_error((string) ($preflight['message'] ?? ''))) {
+                        $stale_reason = 'source_stale';
+                    }
+                    $fail = [
+                        'success' => false,
+                        'message' => "Failed to apply patch to {$filePatch->filePath}: {$preflight['message']}",
+                        'backup_metadata' => null,
+                    ];
+                    if ($stale_reason !== null) {
+                        $fail['reason'] = $stale_reason;
+                    }
+                    return $fail;
+                }
+                $resolved[] = [$filePatch, $filePath];
+            }
+
+            if ($dryRun) {
+                return [
+                    'success' => true,
+                    'message' => "Dry-run: Patch would be applied to " . count($resolved) . " file(s).",
+                    'backup_metadata' => null,
+                ];
+            }
+
+            $backupErrorId = $errorId ?: 'manual_' . bin2hex(random_bytes(4));
+            $backupMetadata = $this->backupManager->createBackup(
+                $backupErrorId,
+                $filesToBackup,
+                true, // compress
+                true  // verify
+            );
+            echo "Created backup: {$backupMetadata['backup_dir']}\n";
+
+            $appliedFiles = [];
+            $syntaxErrorsAll = [];
+            foreach ($resolved as [$filePatch, $filePath]) {
+                $result = $this->patchApplicator->applyPatch(
+                    $filePatch,
+                    $filePath,
+                    false,
+                    true
+                );
+                if (empty($result['success'])) {
+                    $stale_reason = !empty($result['reason']) ? (string) $result['reason'] : null;
+                    if ($stale_reason === null
+                        && function_exists('patcherly_is_source_stale_can_apply_error')
+                        && patcherly_is_source_stale_can_apply_error((string) ($result['message'] ?? ''))) {
+                        $stale_reason = 'source_stale';
+                    }
+                    throw new PatchApplyError(
+                        "Failed to apply patch to {$filePatch->filePath}: {$result['message']}",
+                        $stale_reason
+                    );
+                }
+                if (!empty($result['syntaxErrors'])) {
+                    foreach ($result['syntaxErrors'] as $err) {
+                        $syntaxErrorsAll[] = "{$filePatch->filePath}: {$err}";
+                    }
+                }
+                $appliedFiles[] = $filePath;
+                echo "Applied patch to {$filePath}: {$result['message']}\n";
+            }
+
+            if (!empty($syntaxErrorsAll)) {
+                echo "Syntax errors after patch application: " . implode('; ', $syntaxErrorsAll) . "\n";
                 if ($backupMetadata) {
                     $this->rollbackFromBackup($backupMetadata);
                 }
                 return [
                     'success' => false,
-                    'message' => $e->getMessage(),
+                    'message' => 'Syntax validation failed: ' . implode('; ', $syntaxErrorsAll),
                     'backup_metadata' => $backupMetadata
                 ];
             }
+
+            return [
+                'success' => true,
+                'message' => "Patch applied successfully to " . count($appliedFiles) . " file(s).",
+                'backup_metadata' => $backupMetadata
+            ];
+        } catch (PatchApplyError $e) {
+            echo "Failed to apply patch: {$e->getMessage()}\n";
+            if ($backupMetadata) {
+                $this->rollbackFromBackup($backupMetadata);
+            }
+            $fail = [
+                'success' => false,
+                'message' => $e->getMessage(),
+                'backup_metadata' => $backupMetadata
+            ];
+            $reason = is_string($e->reason ?? null) && $e->reason !== '' ? $e->reason : null;
+            if ($reason === null && function_exists('patcherly_is_source_stale_can_apply_error')
+                && patcherly_is_source_stale_can_apply_error($e->getMessage())) {
+                $reason = 'source_stale';
+            }
+            if ($reason !== null) {
+                $fail['reason'] = $reason;
+            }
+            return $fail;
         } catch (Exception $e) {
             echo "Exception during fix application: " . $e->getMessage() . "\n";
             if ($backupMetadata) {
@@ -3025,10 +3060,10 @@ function patcherly_php_local_router() {
                     if ($act === 'reject-patch') {
                         $decoded = $rawBody !== '' ? json_decode($rawBody, true) : null;
                         $resolution = is_array($decoded) ? ($decoded['resolution'] ?? '') : '';
-                        $allowed = ['manual_suggestion', 'manual_own', 'not_needed'];
+                        $allowed = ['manual_suggestion', 'manual_own', 'not_needed', 'patch_wrong', 'analysis_wrong', 'both_wrong'];
                         if (!in_array($resolution, $allowed, true)) {
                             http_response_code(400);
-                            echo json_encode(['error' => 'resolution required: manual_suggestion, manual_own, or not_needed']);
+                            echo json_encode(['error' => 'resolution required: manual_suggestion, manual_own, not_needed, patch_wrong, analysis_wrong, or both_wrong']);
                             return;
                         }
                         $payload = ['resolution' => $resolution];

@@ -8,6 +8,25 @@ class PatchParseError extends Exception {
 }
 
 class PatchApplyError extends Exception {
+    /** @var string|null Structured fail code (e.g. source_stale) when known. */
+    public $reason = null;
+
+    public function __construct($message = '', $reason = null) {
+        parent::__construct($message);
+        $this->reason = is_string($reason) && $reason !== '' ? $reason : null;
+    }
+}
+
+/**
+ * True when canApply failed because live file left the patch pre-image (source drift).
+ */
+function patcherly_is_source_stale_can_apply_error($error) {
+    $e = is_string($error) ? $error : '';
+    if ($e === '') {
+        return false;
+    }
+    return (stripos($e, 'Context mismatch') !== false)
+        || (stripos($e, 'Hunk starts at line') !== false);
 }
 
 class FileLock {
@@ -751,11 +770,15 @@ class PatchApplicator {
                     'syntaxErrors' => null,
                 ];
             }
-            return [
+            $out = [
                 'success' => false,
                 'message' => "Cannot apply patch: {$canApply['error']}",
                 'syntaxErrors' => null
             ];
+            if (patcherly_is_source_stale_can_apply_error($canApply['error'] ?? '')) {
+                $out['reason'] = 'source_stale';
+            }
+            return $out;
         }
         
         if ($dryRun) {
