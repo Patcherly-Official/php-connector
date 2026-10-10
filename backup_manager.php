@@ -10,14 +10,14 @@ class AgentBackupManager {
     
     /**
      * Initialize backup manager.
-     * 
+     *
      * @param string|null $backupRoot Root directory for backups. If null, uses:
      *   - PATCHERLY_BACKUP_ROOT environment variable
-     *   - ../backups/ (outside webroot, default)
+     *   - .patcherly_backups/ under cwd (same default as the agent + uninstall wipe)
      */
     public function __construct($backupRoot = null) {
         if ($backupRoot === null) {
-            $backupRoot = getenv('PATCHERLY_BACKUP_ROOT') ?: '../backups';
+            $backupRoot = getenv('PATCHERLY_BACKUP_ROOT') ?: '.patcherly_backups';
         }
         $this->backupRoot = realpath($backupRoot) ?: $backupRoot;
         $configuredRoots = getenv('PATCHERLY_TARGET_ROOTS') ?: '';

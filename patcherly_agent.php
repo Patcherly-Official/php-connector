@@ -1,16 +1,16 @@
 <?php
 /**
- * PHP Agent for resource-constrained environments
- * Monitors log files for errors, sends error context to a central server,
- * applies fixes and rolls back changes if necessary.
- * 
- * This script simulates the behavior similar to connectors/patcherly_agent.py
- * using PHP. It's designed to run in a resource-constrained environment.
- * 
- * Usage: php patcherly_agent.php [poll_interval_in_seconds]
+ * PHP Agent — long-running poll loop for Patcherly (error ingest, apply, rollback).
+ *
+ * Pair first with the CLI (`patcherly login` / `php patcherly_cli.php login`).
+ * This file does not accept login/logout argv; use patcherly_cli.php for OAuth.
+ *
+ * Usage:
+ *   php patcherly_agent.php
+ *   php -S 127.0.0.1:8083 patcherly_agent.php   # optional local file-content / approvals
  */
 
-// Default API URL for auto-discovery fallback (production; proxy only for legacy shared-host)
+// Default API host when SERVER_URL / PATCHERLY_API_BASE are unset.
 define('DEFAULT_API_URL', 'https://api.patcherly.com');
 require_once __DIR__ . '/lib/ingest_severity.php';
 require_once __DIR__ . '/lib/file_context_reader.php';
@@ -293,7 +293,7 @@ class PHPAgent {
     }
 
     /**
-     * Build a direct-API endpoint URL from a registry path (/v1/..., /auth/..., or legacy /api/...).
+     * Build a direct-API endpoint URL from a registry path (/v1/..., /auth/...).
      */
     private function buildApiEndpoint($path) : string {
         if (is_string($path) && preg_match('#^https?://#i', $path)) {
@@ -2218,7 +2218,6 @@ class PHPAgent {
     }
 
     private function sendSigned($method, $path, $data = null, $headers = []) {
-        // Use buildApiEndpoint to construct URLs correctly for proxy deployments
         $url = (strpos($path, 'http') === 0) ? $path : $this->buildApiEndpoint($path);
         $body = ($method === 'GET') ? '' : json_encode($data ?: []);
         $headers = $this->buildAuthHeaders($method, $path, $body, $headers);

@@ -8,7 +8,11 @@ declare(strict_types=1);
  *
  * Subcommands:
  *   login        Run the device-authorization flow and save the token bundle.
- *   logout       Revoke the current token and delete the local credential file.
+ *   logout       Revoke the current token and delete the local credential file
+ *                (unpair; keep install, queues, backups).
+ *   uninstall    Stop the agent best-effort, revoke with lifecycle=uninstalled
+ *                (Sites tip + audit), wipe credentials/queue/cache, optional
+ *                backups prompt, then report what was left.
  *   status       Print workspace/site/scope/expiry of the current token.
  *   refresh      Force a refresh-token rotation.
  *   heartbeat    Cheap liveness ping: Bearer-only GET /v1/targets/connector-status?plugin_version=. Wires
@@ -48,6 +52,7 @@ require_once __DIR__ . '/lib/api_paths.php';
 require_once __DIR__ . '/connector_version.php';
 require_once __DIR__ . '/context_consent.php';
 require_once __DIR__ . '/context_collector.php';
+require_once __DIR__ . '/uninstall_local.php';
 
 if (PHP_SAPI !== 'cli') {
     fwrite(STDERR, "patcherly_cli.php is meant to be run from the command line.\n");
@@ -101,6 +106,8 @@ function patcherly_cli_parse_args(array $argv): array
         // side 403 test_window_closed contract pass --no-preflight to
         // bypass this check.
         'no-preflight' => false,
+        'keep-backups' => false,
+        'remove-backups' => false,
     ];
     for ($i = 1; $i < count($argv); $i++) {
         $a = $argv[$i];
@@ -118,7 +125,7 @@ function patcherly_cli_parse_args(array $argv): array
                     $opts[$key] = true;
                 }
             }
-        } elseif (in_array($a, ['login', 'logout', 'status', 'refresh', 'heartbeat', 'send-test', 'context', 'help'], true)) {
+        } elseif (in_array($a, ['login', 'logout', 'uninstall', 'status', 'refresh', 'heartbeat', 'send-test', 'context', 'help'], true)) {
             $cmd = $a;
         }
     }
@@ -318,6 +325,61 @@ function patcherly_cli_logout(array $opts): void
     }
     $store->clear();
     fwrite(STDERR, "Logged out. Local credentials cleared.\n");
+}
+
+function patcherly_cli_uninstall(array $opts): void
+{
+    $store = new PatcherlyCredentialStore();
+    $creds = $store->load();
+    foreach (patcherly_uninstall_stop_agent_best_effort() as $note) {
+        fwrite(STDERR, 'patcherly uninstall: ' . $note . "\n");
+    }
+    if ($creds !== null && (!empty($creds['access_token']) || !empty($creds['refresh_token']))) {
+        try {
+            patcherly_oauth_revoke_token(
+                $opts['api-base'],
+                $opts['client-id'],
+                (string) ($creds['refresh_token'] ?? $creds['access_token']),
+                'logout',
+                'uninstalled'
+            );
+            fwrite(STDERR, "patcherly uninstall: revoked OAuth (lifecycle=uninstalled).\n");
+        } catch (Throwable $e) {
+            fwrite(STDERR, 'Warning: revoke failed: ' . $e->getMessage() . "\n");
+        }
+    } else {
+        fwrite(STDERR, "patcherly uninstall: no local credentials (Sites may already be offline).\n");
+    }
+    $removeBackups = patcherly_uninstall_prompt_remove_backups(
+        !empty($opts['keep-backups']),
+        !empty($opts['remove-backups'])
+    );
+    [$removed, $left] = patcherly_uninstall_wipe_local($removeBackups);
+    if (!empty($opts['json'])) {
+        fwrite(STDOUT, json_encode([
+            'removed' => $removed,
+            'left' => $left,
+            'backups_removed' => $removeBackups,
+        ], JSON_PRETTY_PRINT) . "\n");
+        return;
+    }
+    fwrite(STDERR, "\nRemoved:\n");
+    if ($removed) {
+        foreach ($removed as $p) {
+            fwrite(STDERR, '  - ' . $p . "\n");
+        }
+    } else {
+        fwrite(STDERR, "  (nothing found to remove)\n");
+    }
+    fwrite(STDERR, "\nLeft for you to remove if needed:\n");
+    foreach ($left as $p) {
+        fwrite(STDERR, '  - ' . $p . "\n");
+    }
+    fwrite(
+        STDERR,
+        "\nUninstall complete. Sites tip shows \"Connector reported uninstalled\" " .
+        "when the goodbye reached the API.\n"
+    );
 }
 
 function patcherly_cli_status(): void
@@ -608,6 +670,9 @@ try {
         case 'logout':
             patcherly_cli_logout($opts);
             break;
+        case 'uninstall':
+            patcherly_cli_uninstall($opts);
+            break;
         case 'status':
             patcherly_cli_status();
             break;
@@ -625,7 +690,8 @@ try {
             break;
         case 'help':
         default:
-            fwrite(STDOUT, "Usage: php patcherly_cli.php <login|logout|status|refresh|heartbeat|send-test|context> [--api-base URL] [--client-id ID] [--json] [--no-preflight]\n");
+            fwrite(STDOUT, "Usage: php patcherly_cli.php <login|logout|uninstall|status|refresh|heartbeat|send-test|context> [--api-base URL] [--client-id ID] [--json] [--no-preflight]\n");
+            fwrite(STDOUT, "       php patcherly_cli.php uninstall [--keep-backups|--remove-backups] [--json]\n");
             fwrite(STDOUT, "       php patcherly_cli.php context <get|set|upload> [--json]\n");
             fwrite(STDOUT, "       php patcherly_cli.php context set full|minimal|off\n");
     }

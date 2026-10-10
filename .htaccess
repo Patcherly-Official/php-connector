@@ -1,6 +1,6 @@
 # Deny all access to backup directory
 # This file should be placed in the backup root directory
-# Default location: ../backups/ (outside webroot)
+# Copied into the backup root (default: .patcherly_backups/)
 
 <IfModule mod_authz_core.c>
     # Apache 2.4+
