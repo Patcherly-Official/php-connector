@@ -4,6 +4,74 @@
  * Parity with connectors/python/uninstall_local.py.
  */
 
+if (!function_exists('patcherly_uninstall_is_safe_wipe_target')) {
+    /**
+     * Refuse recursive wipe of filesystem root, install dir, or their ancestors.
+     *
+     * @param list<string> $protect
+     */
+    function patcherly_uninstall_is_safe_wipe_target(
+        string $candidate,
+        string $installDir,
+        array $protect = []
+    ): bool {
+        $target = realpath($candidate);
+        if ($target === false) {
+            $target = $candidate;
+            if (!preg_match('#^(/|[A-Za-z]:[\\\\/])#', $target)) {
+                return false;
+            }
+            // Normalize .. segments without requiring the path to exist yet.
+            $parts = preg_split('#[\\\\/]+#', $target);
+            $norm = [];
+            foreach ($parts as $part) {
+                if ($part === '' || $part === '.') {
+                    continue;
+                }
+                if ($part === '..') {
+                    array_pop($norm);
+                    continue;
+                }
+                $norm[] = $part;
+            }
+            if (preg_match('#^([A-Za-z]:)#', $candidate, $m)) {
+                $target = $m[1] . DIRECTORY_SEPARATOR . implode(DIRECTORY_SEPARATOR, $norm);
+            } else {
+                $target = DIRECTORY_SEPARATOR . implode(DIRECTORY_SEPARATOR, $norm);
+            }
+        }
+        $install = realpath($installDir);
+        if ($install === false) {
+            $install = rtrim($installDir, "/\\");
+        }
+        $target = rtrim(str_replace('\\', '/', $target), '/');
+        $install = rtrim(str_replace('\\', '/', $install), '/');
+        if ($target === '' || $target === '/' || preg_match('#^[A-Za-z]:$#', $target)) {
+            return false;
+        }
+        if ($target === $install) {
+            return false;
+        }
+        if (strpos($install . '/', $target . '/') === 0) {
+            return false;
+        }
+        foreach ($protect as $p) {
+            $protected = realpath((string) $p);
+            if ($protected === false) {
+                $protected = rtrim(str_replace('\\', '/', (string) $p), '/');
+            } else {
+                $protected = rtrim(str_replace('\\', '/', $protected), '/');
+            }
+            if ($protected !== '' && $protected !== $target
+                && strpos($protected . '/', $target . '/') === 0
+            ) {
+                return false;
+            }
+        }
+        return true;
+    }
+}
+
 if (!function_exists('patcherly_uninstall_resolve_paths')) {
     /**
      * @return array<string,string>
@@ -109,9 +177,21 @@ if (!function_exists('patcherly_uninstall_rmtree')) {
     /**
      * @param list<string> $removed
      * @param list<string> $left
+     * @param list<string> $protect
      */
-    function patcherly_uninstall_rmtree(string $path, array &$removed, array &$left): void
-    {
+    function patcherly_uninstall_rmtree(
+        string $path,
+        array &$removed,
+        array &$left,
+        string $installDir = '',
+        array $protect = []
+    ): void {
+        if ($installDir !== ''
+            && !patcherly_uninstall_is_safe_wipe_target($path, $installDir, $protect)
+        ) {
+            $left[] = $path . ' (refused: unsafe wipe target)';
+            return;
+        }
         if (!file_exists($path)) {
             return;
         }
@@ -148,10 +228,22 @@ if (!function_exists('patcherly_uninstall_wipe_local')) {
         $paths = patcherly_uninstall_resolve_paths($cwd);
         $removed = [];
         $left = [];
+        $protect = [
+            $paths['credentials'],
+            $paths['queue'],
+            $paths['dlq'],
+            $paths['ids'],
+        ];
         foreach (['queue', 'dlq', 'ids'] as $key) {
             patcherly_uninstall_safe_unlink($paths[$key], $removed, $left);
         }
-        patcherly_uninstall_rmtree($paths['cache_dir'], $removed, $left);
+        patcherly_uninstall_rmtree(
+            $paths['cache_dir'],
+            $removed,
+            $left,
+            $paths['install_dir'],
+            $protect
+        );
         patcherly_uninstall_safe_unlink($paths['credentials'], $removed, $left);
         $credDir = $paths['credentials_dir'];
         if (is_dir($credDir)) {
@@ -163,7 +255,13 @@ if (!function_exists('patcherly_uninstall_wipe_local')) {
             }
         }
         if ($removeBackups) {
-            patcherly_uninstall_rmtree($paths['backup_root'], $removed, $left);
+            patcherly_uninstall_rmtree(
+                $paths['backup_root'],
+                $removed,
+                $left,
+                $paths['install_dir'],
+                $protect
+            );
         } elseif (file_exists($paths['backup_root'])) {
             $left[] = rtrim($paths['backup_root'], "/\\") . DIRECTORY_SEPARATOR . ' (pre-apply backups kept)';
         }
