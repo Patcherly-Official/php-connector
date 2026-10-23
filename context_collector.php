@@ -108,46 +108,36 @@ class Patcherly_PHPContextCollector {
     }
     
     /**
-     * Detect which framework is being used
+     * Detect which framework is being used (runtime first, then filesystem cues).
      */
     private function detect_framework(): array {
         $framework = [
             'detected' => null,
             'version' => null,
         ];
-        
-        // Check for Laravel
-        if (class_exists('Illuminate\Foundation\Application')) {
-            $framework['detected'] = 'laravel';
-            if (defined('Illuminate\Foundation\Application::VERSION')) {
+
+        require_once __DIR__ . '/framework_detect.php';
+        $detected = patcherly_detect_php_framework(null);
+        if ($detected !== null) {
+            $framework['detected'] = $detected;
+        }
+
+        if ($framework['detected'] === 'laravel' && class_exists('Illuminate\\Foundation\\Application')) {
+            if (defined('Illuminate\\Foundation\\Application::VERSION')) {
                 $framework['version'] = Illuminate\Foundation\Application::VERSION;
             }
-        }
-        // Check for Symfony
-        elseif (class_exists('Symfony\Component\HttpKernel\Kernel')) {
-            $framework['detected'] = 'symfony';
-            if (defined('Symfony\Component\HttpKernel\Kernel::VERSION')) {
+        } elseif ($framework['detected'] === 'symfony' && class_exists('Symfony\\Component\\HttpKernel\\Kernel')) {
+            if (defined('Symfony\\Component\\HttpKernel\\Kernel::VERSION')) {
                 $framework['version'] = Symfony\Component\HttpKernel\Kernel::VERSION;
             }
-        }
-        // Check for CodeIgniter
-        elseif (defined('CI_VERSION')) {
-            $framework['detected'] = 'codeigniter';
+        } elseif ($framework['detected'] === 'codeigniter' && defined('CI_VERSION')) {
             $framework['version'] = CI_VERSION;
-        }
-        // Check for Yii
-        elseif (class_exists('yii\base\Application')) {
-            $framework['detected'] = 'yii';
-            if (defined('Yii::VERSION')) {
-                $framework['version'] = Yii::VERSION;
-            }
-        }
-        // Check for Zend Framework
-        elseif (class_exists('Zend\Version\Version')) {
-            $framework['detected'] = 'zend';
+        } elseif ($framework['detected'] === 'yii' && class_exists('yii\\base\\Application') && defined('Yii::VERSION')) {
+            $framework['version'] = Yii::VERSION;
+        } elseif ($framework['detected'] === 'zend' && class_exists('Zend\\Version\\Version')) {
             $framework['version'] = Zend\Version\Version::VERSION;
         }
-        
+
         return $framework;
     }
     

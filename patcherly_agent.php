@@ -1465,7 +1465,7 @@ class PHPAgent {
             $payload['target_id'] = (string)$this->targetId;
         }
         $payload['code_language'] = 'php';
-        $fw = $this->detectFrameworkForIngest();
+        $fw = $this->detectFrameworkForIngest(is_string($filePath) ? $filePath : null);
         if ($fw !== null) {
             $payload['code_framework'] = $fw;
         }
@@ -2441,14 +2441,17 @@ class PHPAgent {
     }
     
     private function isPathExcluded($filePath) : bool {
-        // Check if a file path matches any exclusion pattern (PRIMARY filtering)
-        if (empty($this->excludePaths)) {
+        // Check if a file path matches any exclusion pattern (PRIMARY filtering).
+        // Never no-op when the API cache is empty — apply the monitoring floor so
+        // vendor/node_modules noise is dropped before POST (server still defends).
+        $excludePaths = $this->effectiveExcludePaths();
+        if (empty($excludePaths)) {
             return false;
         }
         
         $normalizedPath = str_replace('\\', '/', $filePath);
         
-        foreach ($this->excludePaths as $pattern) {
+        foreach ($excludePaths as $pattern) {
             if (empty($pattern)) continue;
             
             $normalizedPattern = str_replace('\\', '/', $pattern);
@@ -2833,25 +2836,51 @@ class PHPAgent {
 
     /**
      * Detect framework for ingest payload (code_framework). Used for AI template selection.
-     * Mirrors context_collector logic; no dependency on context collector.
+     * Runtime class_exists first; filesystem cues (artisan / composer / vendor) for the
+     * standalone agent that does not bootstrap the customer app.
+     *
+     * @param string|null $hintPath Throw-site path (e.g. …/vendor/laravel/…) to infer app root.
      */
-    private function detectFrameworkForIngest() : ?string {
-        if (class_exists('Illuminate\Foundation\Application')) {
-            return 'laravel';
+    private function detectFrameworkForIngest(?string $hintPath = null) : ?string {
+        require_once __DIR__ . '/framework_detect.php';
+        return patcherly_detect_php_framework($hintPath);
+    }
+
+    /**
+     * Monitoring exclude floor when connector-status has not cached exclude_paths yet.
+     * Must stay aligned with server DEFAULT_EXCLUDE_PATHS (non-WP).
+     *
+     * @return list<string>
+     */
+    private function defaultMonitoringExcludePaths() : array {
+        return [
+            '/vendor/',
+            '/node_modules/',
+            '**/vendor/**',
+            '**/node_modules/**',
+            '*.tmp',
+            '/.git/',
+            '/.svn/',
+            '/.hg/',
+            '.apr_backups/',
+            '**/.apr_backups/**',
+            'apr_queue.jsonl',
+            'apr_ids.json',
+            '.patcherly_backups/',
+            '**/.patcherly_backups/**',
+            'patcherly_queue.jsonl',
+            'patcherly_ids.json',
+        ];
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function effectiveExcludePaths() : array {
+        if (!empty($this->excludePaths)) {
+            return $this->excludePaths;
         }
-        if (class_exists('Symfony\Component\HttpKernel\Kernel')) {
-            return 'symfony';
-        }
-        if (defined('CI_VERSION')) {
-            return 'codeigniter';
-        }
-        if (class_exists('yii\base\Application')) {
-            return 'yii';
-        }
-        if (class_exists('Zend\Version\Version')) {
-            return 'zend';
-        }
-        return null;
+        return $this->defaultMonitoringExcludePaths();
     }
 
     private function uuidv4() : string {
