@@ -17,6 +17,7 @@ require_once __DIR__ . '/lib/file_context_reader.php';
 require_once __DIR__ . '/lib/api_paths.php';
 require_once __DIR__ . '/lib/error_event_extract.php';
 require_once __DIR__ . '/lib/http_error_detail.php';
+require_once __DIR__ . '/lib/SelfUpdate.php';
 
 /**
  * True when the operator pinned the API host via SERVER_URL or PATCHERLY_API_BASE.
@@ -309,15 +310,30 @@ class PHPAgent {
     }
 
     /**
-     * Registry connector-status path with plugin_version query (HMAC + URL parity).
+     * Registry connector-status path with version + layout query (HMAC + URL parity).
      */
     private function connectorStatusPathWithVersion(): string {
         $path = PatcherlyApiPaths::NAMED_TARGETS_CONNECTOR_STATUS;
-        if (!defined('PATCHERLY_CONNECTOR_VERSION') || PATCHERLY_CONNECTOR_VERSION === '') {
+        $params = [];
+        if (defined('PATCHERLY_CONNECTOR_VERSION') && PATCHERLY_CONNECTOR_VERSION !== '') {
+            $params[] = 'plugin_version=' . rawurlencode((string) PATCHERLY_CONNECTOR_VERSION);
+        }
+        try {
+            $layout = PatcherlySelfUpdate::detectInstallLayout();
+            if ($layout !== '') {
+                $params[] = 'install_layout=' . rawurlencode($layout);
+            }
+            if (PatcherlySelfUpdate::preferAutoUpdateEnv()) {
+                $params[] = 'prefer_auto_update=1';
+            }
+        } catch (\Throwable $e) {
+            // Optional — status still works without layout hints
+        }
+        if ($params === []) {
             return $path;
         }
         $sep = (strpos($path, '?') === false) ? '?' : '&';
-        return $path . $sep . 'plugin_version=' . rawurlencode((string) PATCHERLY_CONNECTOR_VERSION);
+        return $path . $sep . implode('&', $params);
     }
 
     private function discoverApiUrl() : void {
@@ -2412,8 +2428,9 @@ class PHPAgent {
                 }
                 $reconnect = (isset($j['reconnect']) && is_array($j['reconnect'])) ? $j['reconnect'] : [];
                 $phase = isset($reconnect['phase']) && is_string($reconnect['phase']) ? $reconnect['phase'] : '';
-                // Soft/server reconnect: poll ~60s (default 300s) for faster nudge pickup.
-                $this->excludePathsCacheTtl = ($phase === 'soft_hold' || $phase === 'server_retrying') ? 60 : 300;
+                $pendingUpdate = isset($j['connector_update']) && is_array($j['connector_update']);
+                // Soft/server reconnect or pending archive update: poll ~60s (default 300s).
+                $this->excludePathsCacheTtl = ($phase === 'soft_hold' || $phase === 'server_retrying' || $pendingUpdate) ? 60 : 300;
                 $nudgeAt = isset($reconnect['nudge_requested_at']) && is_string($reconnect['nudge_requested_at'])
                     ? $reconnect['nudge_requested_at']
                     : '';
@@ -2434,12 +2451,72 @@ class PHPAgent {
                         // Non-critical
                     }
                 }
+                // Archive self-update: suppress only under Protection mode / Pause.
+                if ($pendingUpdate && empty($j['protection_mode_active'])) {
+                    $this->maybeApplyConnectorUpdate($j['connector_update']);
+                }
             }
         } catch (\Throwable $e) {
             // Non-critical
         }
     }
-    
+
+    /**
+     * Download+verify CDN archive when status returns connector_update intent.
+     *
+     * @param mixed $intent
+     */
+    private function maybeApplyConnectorUpdate($intent): void
+    {
+        if (!is_array($intent) || !$this->targetId) {
+            return;
+        }
+        try {
+            [$ok, $reason, $version] = PatcherlySelfUpdate::applyArchiveUpdate($intent);
+            $this->reportConnectorUpdate(
+                $ok,
+                $version,
+                $ok ? null : $reason,
+                $ok ? ($intent['reason'] ?? null) : $reason
+            );
+            if ($ok) {
+                PatcherlySelfUpdate::scheduleRestartBestEffort();
+            }
+        } catch (\Throwable $exc) {
+            error_log('[patcherly] Connector self-update failed: ' . $exc->getMessage());
+            try {
+                $this->reportConnectorUpdate(false, null, get_class($exc), 'error');
+            } catch (\Throwable $e) {
+                // ignore
+            }
+        }
+    }
+
+    /**
+     * @param bool $ok
+     * @param string|null $version
+     * @param string|null $error
+     * @param mixed $reason
+     */
+    private function reportConnectorUpdate(bool $ok, ?string $version, ?string $error, $reason): void
+    {
+        if (!$this->targetId || !$this->ensureFreshOAuth()) {
+            return;
+        }
+        $path = PatcherlyApiPaths::appPath('targets', (string) $this->targetId, 'connector-update-report');
+        $payload = ['ok' => $ok];
+        if ($version !== null) {
+            $payload['version'] = $version;
+        }
+        if ($error !== null) {
+            $payload['error'] = $error;
+        }
+        if (is_string($reason)) {
+            $payload['reason'] = $reason;
+        }
+        $this->sendSigned('POST', $path, $payload);
+    }
+
     private function isPathExcluded($filePath) : bool {
         // Check if a file path matches any exclusion pattern (PRIMARY filtering).
         // Never no-op when the API cache is empty — apply the monitoring floor so
