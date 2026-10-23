@@ -104,6 +104,7 @@ function patcherly_looks_incomplete_error_block(array $lines): bool {
         }
         if (
             preg_match('/^\s*Stack trace\s*:/i', $ln) === 1
+            || preg_match('/^\s*\[stacktrace\]\s*$/i', $ln) === 1
             || preg_match('/^\s*#\d+\s+/', $ln) === 1
         ) {
             $hasPhpStack = true;
@@ -184,6 +185,7 @@ function patcherly_extract_error_events(array $lines, bool $holdIncomplete = tru
             || preg_match('/^\s+at\s+/', $line) === 1
             || ($stripped !== '' && $stripped[0] === '#')
             || preg_match('/^\s*Stack\s+trace\s*:/i', $stripped) === 1
+            || preg_match('/^\s*\[stacktrace\]\s*$/i', $stripped) === 1
             || preg_match('/^\s*thrown\s+in\s+/i', $stripped) === 1
             || preg_match($pythonExceptionLine, $stripped) === 1
             || preg_match('/^[\s^~]+$/', rtrim($line, "\r\n")) === 1
