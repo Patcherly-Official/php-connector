@@ -17,6 +17,7 @@ if (!function_exists('patcherly_shared_should_skip_log_line_for_ingest')) {
             "Uncaught\\s+\\S*(Error|Exception)",
             "^Traceback\\s",
             "^\\w+(Error|Exception):",
+            "Traceback\\s+\\(most recent call last\\)",
             "^Exception:",
             "^Error:\\s",
             "Unhandled\\s+(Promise\\s+)?Rejection",
@@ -30,14 +31,18 @@ if (!function_exists('patcherly_shared_should_skip_log_line_for_ingest')) {
             "\"severity\"\\s*:\\s*\"(ERROR|CRITICAL|FATAL)\"",
         ];
         $skip = [
-            "^\\(node:\\d+\\)\\s+\\[DEP\\d+\\]",
+            "(?:^|\\]\\s+)(Deprecated|Notice|Warning|Strict\\s+standards)\\s*:",
+            "\\(node:\\d+\\)\\s+\\[DEP\\d+\\]",
             "DeprecationWarning:",
-            "^UserWarning:",
-            "^\\[info\\]",
-            "^INFO:",
-            "^DEBUG:",
+            "PendingDeprecationWarning:",
+            "FutureWarning:",
+            "UserWarning:",
+            "ExperimentalWarning:",
+            "\\[info\\]",
+            "(?:^|\\s)INFO:",
+            "(?:^|\\s)DEBUG:",
         ];
-        $phpPrefix = "^PHP\\s+(Notice|Deprecated|Warning|Strict\\s+standards|Info)\\s*:";
+        $phpPrefix = "PHP\\s+(Notice|Deprecated|Warning|Strict\\s+standards|Info)\\s*:";
         $subs = ["auditor:scan", "\"kind\":\"installed-plugin\""];
         $failureSignal = "\\b(error|exception|traceback|fatal|critical|panic|failed|failure|rejection|errno|segfault)\\b|^\\w+(Error|Exception):";
         foreach ($keep as $pattern) {

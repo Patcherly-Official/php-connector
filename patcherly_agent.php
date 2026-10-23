@@ -144,8 +144,14 @@ class PHPAgent {
 
     private $serverUrl;
     private $logFile = 'logs/error.log';
-    /** @var string[] All server-provided log paths (preset + custom). */
+    /** @var string[] All server-provided log paths (custom first, then preset). */
     private $serverLogPaths = [];
+    /** @var array<string,int> Byte offsets keyed by monitored path. */
+    private $logOffsets = [];
+    /** @var array<string,float> mtime keyed by monitored path. */
+    private $logMtimes = [];
+    /** @var array<string,array> Incomplete-block carry state per path. */
+    private $logCarryByPath = [];
     private $idsPath;
     private $tenantId = null;
     private $targetId = null;
@@ -178,7 +184,6 @@ class PHPAgent {
     private $postApplySuccessErrorIds = [];
 
     /** @var array{pending: string[], since: float|null} */
-    private $logEventCarryState = ['pending' => [], 'since' => null];
 
     public function __construct() {
         // Priority: env > default
@@ -502,25 +507,123 @@ class PHPAgent {
         }
     }
 
+    /**
+     * Resolve absolute path for tailing; prefer the form the API sent when readable.
+     */
+    private function resolveMonitorPath(string $path): ?string {
+        if ($path === '') {
+            return null;
+        }
+        $abs = (strpos($path, '/') === 0 || preg_match('#^[A-Za-z]:[\\\\/]#', $path))
+            ? $path
+            : (getcwd() . DIRECTORY_SEPARATOR . ltrim(str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $path), '/\\'));
+        if (is_readable($path)) {
+            return $path;
+        }
+        if (is_readable($abs)) {
+            return $abs;
+        }
+        // Keep waiting for create (same as single-file mode).
+        return is_readable($path) ? $path : $abs;
+    }
+
+    /**
+     * Paths to multi-tail this tick (custom-first list from the API, else primary).
+     *
+     * @return list<string>
+     */
+    private function monitoredLogPaths(): array {
+        $paths = $this->serverLogPaths ?: [$this->logFile];
+        $out = [];
+        $seen = [];
+        foreach ($paths as $path) {
+            if (!is_string($path) || $path === '') {
+                continue;
+            }
+            $resolved = $this->resolveMonitorPath($path);
+            if ($resolved === null || $resolved === '') {
+                continue;
+            }
+            if (isset($seen[$resolved])) {
+                continue;
+            }
+            $seen[$resolved] = true;
+            $out[] = $resolved;
+        }
+        return $out ?: [$this->logFile];
+    }
+
+    /**
+     * Poll one log file for new bytes and ingest extracted error events.
+     */
+    private function pollOneLogPath(string $logPath): void {
+        try {
+            self::validateLogPath($logPath);
+        } catch (\Throwable $e) {
+            error_log("Patcherly: skipping invalid log path '{$logPath}': " . $e->getMessage());
+            return;
+        }
+        if (!isset($this->logOffsets[$logPath])) {
+            $this->logOffsets[$logPath] = file_exists($logPath) ? (int) filesize($logPath) : 0;
+            $this->logMtimes[$logPath] = file_exists($logPath) ? (float) filemtime($logPath) : 0.0;
+            $this->logCarryByPath[$logPath] = ['pending' => [], 'since' => null];
+            // First observation starts at EOF (do not replay historical file).
+            return;
+        }
+        $lastSize = (int) ($this->logOffsets[$logPath] ?? 0);
+        $lastMtime = (float) ($this->logMtimes[$logPath] ?? 0.0);
+        $currentSize = file_exists($logPath) ? (int) filesize($logPath) : 0;
+        $currentMtime = file_exists($logPath) ? (float) filemtime($logPath) : 0.0;
+        if ($currentSize < $lastSize) {
+            $lastSize = 0;
+            $this->logCarryByPath[$logPath] = ['pending' => [], 'since' => null];
+        } elseif (
+            $currentSize === $lastSize
+            && $currentMtime > $lastMtime + 1e-6
+        ) {
+            $lastSize = 0;
+            $this->logCarryByPath[$logPath] = ['pending' => [], 'since' => null];
+        }
+        $expanded = [];
+        if ($currentSize > $lastSize) {
+            $handle = @fopen($logPath, 'r');
+            if ($handle === false) {
+                error_log("Patcherly: fopen failed for {$logPath}; skipping iteration");
+                return;
+            }
+            fseek($handle, $lastSize);
+            $newLines = [];
+            while (($line = fgets($handle)) !== false) {
+                $newLines[] = $line;
+            }
+            fclose($handle);
+            $this->logOffsets[$logPath] = $currentSize;
+            $this->logMtimes[$logPath] = $currentMtime;
+            foreach ($newLines as $line) {
+                foreach ($this->splitLogOccurrences(rtrim((string) $line, "\r\n")) as $occurrence) {
+                    $expanded[] = $occurrence . "\n";
+                }
+            }
+        } else {
+            $this->logMtimes[$logPath] = $currentMtime;
+        }
+        $carry = $this->logCarryByPath[$logPath] ?? ['pending' => [], 'since' => null];
+        [$events, $carry] = patcherly_ingest_log_lines_with_carry($carry, $expanded);
+        $this->logCarryByPath[$logPath] = $carry;
+        foreach ($events as $event) {
+            if (trim($event) !== '') {
+                echo "Error detected ({$logPath}): " . substr(trim($event), 0, 100) . "...\n";
+                $this->processError($event);
+            }
+        }
+    }
+
     public function monitorLogs() {
         // Try to discover API URL (non-blocking, uses current/default if fails)
         $this->discoverApiUrl();
 
-        // v1.47 hardening: refuse to monitor a log path that fails the
-        // connector-side policy (NUL, traversal, ``..``, stream wrapper,
-        // out-of-allow-list). The server-side policy is the canonical one;
-        // this is defence in depth in case a malicious dashboard tenant
-        // crafts a path that survives a buggy server release.
-        try {
-            self::validateLogPath($this->logFile);
-        } catch (\Throwable $e) {
-            error_log("Patcherly: refusing to monitor invalid log path '{$this->logFile}': " . $e->getMessage());
-            return;
-        }
-
-        $lastSize = file_exists($this->logFile) ? filesize($this->logFile) : 0;
-        $lastMtime = file_exists($this->logFile) ? (float) filemtime($this->logFile) : 0.0;
-        echo "Starting log monitoring on {$this->logFile}...\n";
+        $paths = $this->monitoredLogPaths();
+        echo 'Starting log monitoring on ' . implode(', ', $paths) . "...\n";
         $this->collectAndUploadContext(true);
         $refreshCounter = 0;
         $idDiscoveryCounter = 0;
@@ -528,53 +631,8 @@ class PHPAgent {
             $this->clearExpiredProtectionMode();
             if (!$this->isProtectionModeStandby()) {
                 clearstatcache();
-                $currentSize = file_exists($this->logFile) ? filesize($this->logFile) : 0;
-                $currentMtime = file_exists($this->logFile) ? (float) filemtime($this->logFile) : 0.0;
-                if ($currentSize < $lastSize) {
-                    $lastSize = 0;
-                    $this->logEventCarryState = ['pending' => [], 'since' => null];
-                } elseif (
-                    $currentSize === $lastSize
-                    && isset($lastMtime)
-                    && $currentMtime > ((float) $lastMtime) + 1e-6
-                ) {
-                    // Truncate-then-rewrite to the same byte length.
-                    $lastSize = 0;
-                    $this->logEventCarryState = ['pending' => [], 'since' => null];
-                }
-                $expanded = [];
-                if ($currentSize > $lastSize) {
-                    $handle = @fopen($this->logFile, 'r');
-                    if ($handle === false) {
-                        error_log("Patcherly: fopen failed for {$this->logFile}; skipping iteration");
-                        sleep(5);
-                        continue;
-                    }
-                    fseek($handle, $lastSize);
-                    $newLines = [];
-                    while (($line = fgets($handle)) !== false) {
-                        $newLines[] = $line;
-                    }
-                    fclose($handle);
-                    $lastSize = $currentSize;
-                    $lastMtime = $currentMtime;
-                    foreach ($newLines as $line) {
-                        foreach ($this->splitLogOccurrences(rtrim((string) $line, "\r\n")) as $occurrence) {
-                            $expanded[] = $occurrence . "\n";
-                        }
-                    }
-                } else {
-                    $lastMtime = $currentMtime;
-                }
-                [$events, $this->logEventCarryState] = patcherly_ingest_log_lines_with_carry(
-                    $this->logEventCarryState,
-                    $expanded
-                );
-                foreach ($events as $event) {
-                    if (trim($event) !== '') {
-                        echo "Error detected: " . substr(trim($event), 0, 100) . "...\n";
-                        $this->processError($event);
-                    }
+                foreach ($this->monitoredLogPaths() as $logPath) {
+                    $this->pollOneLogPath($logPath);
                 }
             }
 
