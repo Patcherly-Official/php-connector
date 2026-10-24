@@ -62,6 +62,7 @@ final class PatcherlySelfUpdate
             }
         }
         $parts = array_map('strtolower', explode(DIRECTORY_SEPARATOR, $root));
+        // Composer package under vendor → registry (not CDN self-update).
         if (in_array('vendor', $parts, true)) {
             return 'registry';
         }
@@ -69,12 +70,10 @@ final class PatcherlySelfUpdate
             && is_dir($root . DIRECTORY_SEPARATOR . 'vendor')) {
             return 'registry';
         }
+        // Universal installer, CDN extract, monorepo, or Docker bind-mount.
         if (is_file($root . DIRECTORY_SEPARATOR . 'start.sh')
-            || is_file($root . DIRECTORY_SEPARATOR . 'start.ps1')) {
-            return 'archive';
-        }
-        if (is_file($root . DIRECTORY_SEPARATOR . 'patcherly_agent.php')
-            && is_file($root . DIRECTORY_SEPARATOR . '.env')) {
+            || is_file($root . DIRECTORY_SEPARATOR . 'start.ps1')
+            || is_file($root . DIRECTORY_SEPARATOR . 'patcherly_agent.php')) {
             return 'archive';
         }
         return 'unknown';

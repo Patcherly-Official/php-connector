@@ -95,7 +95,7 @@ OAuth pairing and per-token **HMAC signing**; fix payloads are verified before a
 - [PHP connector: HMAC](https://help.patcherly.com/connectors/php/#hmac-signing)
 - [Prompt injection protection](https://help.patcherly.com/security/prompt-injection-protection/)
 - [Custom sanitizer patterns](https://help.patcherly.com/security/custom-sanitizer-patterns/)
-- [Post-apply restart safety](https://help.patcherly.com/security/post-apply-restart-safety/)
+- [Restart after a fix](https://help.patcherly.com/error-management/app-restart/#safety-and-limits)
 - [Hardening: backup folders](https://help.patcherly.com/connectors/overview/#hardening-backup-folders-and-the-public-web)
 
 ## Documentation & support
