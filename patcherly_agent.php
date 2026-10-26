@@ -172,6 +172,13 @@ class PHPAgent {
     private $oauthCreds = null;
     private $oauthCredFile = null;
     private $oauthClientId = 'patcherly-connector-php';
+    /**
+     * Dashboard approve / rolling_back list poll floor (seconds). Must stay ≥30
+     * across PHP/Python/Node — tighter loops burned the Sentry spans quota (Oct 2026).
+     */
+    private $applyLifecyclePollIntervalSec = 30;
+    /** @var int unix timestamp of last approved+rolling_back list poll */
+    private $lastApplyLifecyclePollAt = 0;
 
     /**
      * Per-process set of error_ids for which post-apply steps already succeeded.
@@ -652,19 +659,16 @@ class PHPAgent {
                 }
             }
 
-            // Pick up dashboard-initiated manual rollbacks (status=rolling_back).
-            // Without this, an operator clicking Rollback in the dashboard would
-            // stall server-side because no connector ever notices the transition.
-            try {
-                $this->processRollingBackErrors();
-            } catch (\Throwable $e) {
-                error_log('Patcherly: processRollingBackErrors raised: ' . $e->getMessage());
-            }
-
-            try {
-                $this->processApprovedFixes();
-            } catch (\Throwable $e) {
-                error_log('Patcherly: processApprovedFixes raised: ' . $e->getMessage());
+            // Approve + rolling_back discovery — capped at 30s (not every 5s log tick).
+            // One combined list GET (status=approved,applying,rolling_back).
+            $now = time();
+            if (($now - $this->lastApplyLifecyclePollAt) >= $this->applyLifecyclePollIntervalSec) {
+                $this->lastApplyLifecyclePollAt = $now;
+                try {
+                    $this->processApplyLifecyclePoll();
+                } catch (\Throwable $e) {
+                    error_log('Patcherly: processApplyLifecyclePoll raised: ' . $e->getMessage());
+                }
             }
 
             // Refresh IDs, log paths, and API URL every 5 minutes (300s / 5s sleep = 60 iterations)
@@ -2246,6 +2250,15 @@ class PHPAgent {
                 $headers['X-Patcherly-Hmac-Kid'] = $creds['hmac_secret_id'];
             }
         }
+        // Canonical connector UA so API logs / Sentry can attribute traffic (tag: connector=php).
+        if (!isset($headers['User-Agent'])) {
+            $ver = (defined('PATCHERLY_CONNECTOR_VERSION') && PATCHERLY_CONNECTOR_VERSION !== '')
+                ? (string) PATCHERLY_CONNECTOR_VERSION
+                : '';
+            $headers['User-Agent'] = $ver !== ''
+                ? 'patcherly-connector-php/' . $ver
+                : 'patcherly-connector-php';
+        }
         return $headers;
     }
 
@@ -2661,40 +2674,84 @@ class PHPAgent {
     private $approvedApplyInFlight = [];
 
     /**
+     * Single list poll for approved + applying + rolling_back (one GET / 30s).
+     * Splits items by status into apply vs rollback handlers.
+     */
+    public function processApplyLifecyclePoll() : void {
+        if (!$this->targetId) {
+            return;
+        }
+        $listPath = PatcherlyApiPaths::NAMED_ERRORS_LIST;
+        $listQuery = '?status=' . rawurlencode('approved,applying,rolling_back')
+            . '&target_id=' . rawurlencode((string)$this->targetId) . '&limit=50';
+        $url = $this->buildApiEndpoint($listPath . $listQuery);
+        $reqHeaders = $this->buildAuthHeaders('GET', $listPath . $listQuery, '');
+        $respHeaders = [];
+        $httpCode = 0;
+        $body = $this->sendGet($url, $reqHeaders, $respHeaders, $httpCode);
+        if ($body === false || $httpCode !== 200) {
+            return;
+        }
+        $items = json_decode($body, true);
+        if (!is_array($items)) {
+            return;
+        }
+        $approvedItems = [];
+        $rollbackItems = [];
+        foreach ($items as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+            $st = isset($item['status']) ? (string)$item['status'] : '';
+            if ($st === 'rolling_back') {
+                $rollbackItems[] = $item;
+            } elseif ($st === 'approved' || $st === 'applying') {
+                $approvedItems[] = $item;
+            }
+        }
+        if (!$this->isProtectionModeStandby()) {
+            $this->processApprovedFixes($approvedItems);
+        }
+        $this->processRollingBackErrors($rollbackItems);
+    }
+
+    /**
      * Pick up dashboard-approved fixes (status approved/applying) and apply them.
      * Without this poll, manual approve from the dashboard stalls until a new log
      * line retriggers the auto_apply ingest pipeline.
+     *
+     * @param list<array<string,mixed>>|null $prefetchedItems when set (from
+     *        processApplyLifecyclePoll), skips a second list GET.
      */
-    public function processApprovedFixes() : void {
+    public function processApprovedFixes($prefetchedItems = null) : void {
         if (!$this->targetId || $this->isProtectionModeStandby()) {
             return;
         }
-        foreach (['approved', 'applying'] as $status) {
+        $items = is_array($prefetchedItems) ? $prefetchedItems : null;
+        if ($items === null) {
             $listPath = PatcherlyApiPaths::NAMED_ERRORS_LIST;
-            $listQuery = '?status=' . rawurlencode($status)
-                . '&target_id=' . rawurlencode((string)$this->targetId) . '&limit=10';
+            $listQuery = '?status=' . rawurlencode('approved,applying')
+                . '&target_id=' . rawurlencode((string)$this->targetId) . '&limit=50';
             $url = $this->buildApiEndpoint($listPath . $listQuery);
             $reqHeaders = $this->buildAuthHeaders('GET', $listPath . $listQuery, '');
             $respHeaders = [];
             $httpCode = 0;
             $body = $this->sendGet($url, $reqHeaders, $respHeaders, $httpCode);
             if ($body === false || $httpCode !== 200) {
+                return;
+            }
+            $decoded = json_decode($body, true);
+            $items = is_array($decoded) ? $decoded : [];
+        }
+        foreach ($items as $item) {
+            if (!is_array($item)) {
                 continue;
             }
-            $items = json_decode($body, true);
-            if (!is_array($items)) {
+            $errorId = isset($item['id']) ? (string)$item['id'] : '';
+            if ($errorId === '' || isset($this->approvedApplyInFlight[$errorId])) {
                 continue;
             }
-            foreach ($items as $item) {
-                if (!is_array($item)) {
-                    continue;
-                }
-                $errorId = isset($item['id']) ? (string)$item['id'] : '';
-                if ($errorId === '' || isset($this->approvedApplyInFlight[$errorId])) {
-                    continue;
-                }
-                $this->applyApprovedFixFromServer($errorId);
-            }
+            $this->applyApprovedFixFromServer($errorId);
         }
     }
 
@@ -2826,27 +2883,31 @@ class PHPAgent {
      * ``POST /v1/errors/{id}/fix/rollback``. Without this poll, dashboard-
      * initiated rollback would stall server-side.
      */
-    public function processRollingBackErrors() : void {
+    /**
+     * @param list<array<string,mixed>>|null $prefetchedItems when set, skips list GET.
+     */
+    public function processRollingBackErrors($prefetchedItems = null) : void {
         if (!$this->targetId) {
             return; // nothing to scope by yet
         }
 
-        $listPath = PatcherlyApiPaths::NAMED_ERRORS_LIST;
-        $listQuery = '?status=rolling_back&target_id=' . rawurlencode((string)$this->targetId) . '&limit=50';
-        $url = $this->buildApiEndpoint($listPath . $listQuery);
-        $reqHeaders = $this->buildAuthHeaders('GET', $listPath . $listQuery, '');
-        $respHeaders = [];
-        $httpCode = 0;
-        $body = $this->sendGet($url, $reqHeaders, $respHeaders, $httpCode);
-        if ($body === false) {
-            return;
-        }
-        if ($httpCode !== 200) {
-            return;
-        }
-        $items = json_decode($body, true);
-        if (!is_array($items)) {
-            return;
+        $items = is_array($prefetchedItems) ? $prefetchedItems : null;
+        if ($items === null) {
+            $listPath = PatcherlyApiPaths::NAMED_ERRORS_LIST;
+            $listQuery = '?status=rolling_back&target_id=' . rawurlencode((string)$this->targetId) . '&limit=50';
+            $url = $this->buildApiEndpoint($listPath . $listQuery);
+            $reqHeaders = $this->buildAuthHeaders('GET', $listPath . $listQuery, '');
+            $respHeaders = [];
+            $httpCode = 0;
+            $body = $this->sendGet($url, $reqHeaders, $respHeaders, $httpCode);
+            if ($body === false) {
+                return;
+            }
+            if ($httpCode !== 200) {
+                return;
+            }
+            $decoded = json_decode($body, true);
+            $items = is_array($decoded) ? $decoded : [];
         }
 
         foreach ($items as $item) {

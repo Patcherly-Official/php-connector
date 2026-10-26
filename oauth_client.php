@@ -18,6 +18,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/credential_store.php';
 require_once __DIR__ . '/lib/api_paths.php';
+require_once __DIR__ . '/connector_version.php';
 
 if (!function_exists('patcherly_oauth_post_form')) {
     /**
@@ -38,7 +39,7 @@ if (!function_exists('patcherly_oauth_post_form')) {
             CURLOPT_HTTPHEADER => [
                 'Content-Type: application/x-www-form-urlencoded',
                 'Accept: application/json',
-                'User-Agent: patcherly-connector-php/1.46',
+                'User-Agent: patcherly-connector-php/' . (defined('PATCHERLY_CONNECTOR_VERSION') ? PATCHERLY_CONNECTOR_VERSION : 'unknown'),
             ],
             CURLOPT_TIMEOUT => 30,
         ]);
@@ -306,7 +307,7 @@ if (!function_exists('patcherly_oauth_signal_reconnect_phase_best_effort')) {
                 'Authorization: Bearer ' . $accessToken,
                 'X-Patcherly-Timestamp: ' . $ts,
                 'X-Patcherly-Signature: ' . $sig,
-                'User-Agent: patcherly-connector-php/1.46',
+                'User-Agent: patcherly-connector-php/' . (defined('PATCHERLY_CONNECTOR_VERSION') ? PATCHERLY_CONNECTOR_VERSION : 'unknown'),
             ];
             if (is_string($hmacKid) && $hmacKid !== '') {
                 $headers[] = 'X-Patcherly-Hmac-Kid: ' . $hmacKid;
